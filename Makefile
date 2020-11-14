@@ -1,5 +1,5 @@
 .PHONY: create_environment requirements
-PYTHON="python3.9"
+PYTHON="python3.8"
 
 create_environment:
 	$(PYTHON) -m pip install -q virtualenv
