@@ -1,2 +1,4 @@
 toolz
 pandas
+scikit-learn
+pytest
