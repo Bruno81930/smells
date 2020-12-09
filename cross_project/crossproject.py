@@ -13,8 +13,7 @@ from typing import Tuple, Dict, ClassVar, Union, List, Callable
 import numpy as np
 from imblearn.over_sampling import SMOTE
 from joblib import load, dump
-from scipy.spatial.distance import jaccard, rogerstanimoto
-from scipy.stats import cosine
+from scipy.spatial.distance import cosine, jaccard, rogerstanimoto
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import f1_score, roc_auc_score, precision_score, recall_score, brier_score_loss, fbeta_score
@@ -80,6 +79,12 @@ class Project:
             raise ValueError("Wrong strategy type")
 
         return self._get_x(versions), self._get_y(versions)
+
+    def get_X(self, set_type="train", strategy="standard"):
+        return self.get_set(set_type, strategy)[0]
+
+    def get_y(self, set_type="train", strategy="standard"):
+        return self.get_set(set_type, strategy)[1]
 
 
 class ModelCache:
@@ -269,7 +274,6 @@ class Normalization(CrossProjectApproach):
         X_test, y_test = oversample(X_test, y_test)
         y_pred = Classifier(train_project.name, classifier, classifier_conf, variation).fit(X_train, y_train).predict(
             X_test)
-        print(evaluator(y_test, y_pred))
         return evaluator(y_test, y_pred)
 
     @staticmethod
@@ -287,22 +291,56 @@ class KNN(CrossProjectApproach):
     """
 
     class TrainingDataset:
-        def __init__(self, train_projects: List[Project]):
-            self.train = np.array([train_project.get_set() for train_project in train_projects])
-            self.X = np.array(map(lambda x: x[0], self.train))
-            self.y = np.array(map(lambda x: x[1], self.train))
-            self.selected = []
+        def __init__(self, train_projects: List[Project], distance: Callable, k: int = 10):
+            self.X = [item for sublist in [train_project.get_X() for train_project in train_projects] for item in
+                      sublist]
+            self.y = [item for sublist in [train_project.get_y() for train_project in train_projects] for item in
+                      sublist]
+            self.distance: Callable = distance
+            self.k: int = k
+            self._selected_X = np.array([])
+            self._selected_y = np.array([])
+            self._distance_cache = dict()
 
         def __len__(self):
-            return np.size(self.train)
+            return np.size(self.X)
 
         def __getitem__(self, key: int):
             assert isinstance(key, int)
             return self.X[key]
 
-        def pop(self, index: int = -1):
-            assert isinstance(index, int)
+        def __repr__(self):
+            return f'TrainingDataset(train_X={self.X}, train_y={self.y}, distance={self.distance}) -> selected={self._selected_X}'
 
+        def pop(self, index: int = -1):
+            return self.X.pop(index), self.y.pop(index)
+
+        def append(self, X, y):
+            self._selected_X = np.append(self._selected_X, X, axis=0)
+            self._selected_y = np.append(self._selected_y, y, axis=0)
+
+        @property
+        def selected(self):
+            return self._selected_X, self._selected_y
+
+        def select_top_k(self, B):
+            distances = np.array([self.calculate_distance(A, B) for A in self.X])
+            indices = sorted(np.argpartition(distances, -self.k)[-self.k:],
+                             reverse=True)  # get indices for top and sort in reverse order
+            [self.append(*self.pop(index)) for index in indices]
+
+        def calculate_distance(self, A, B):
+            return self._lookup(self.distance)(A, B)
+
+        def _lookup(self, func):
+            def _lookup_func(A, B):
+                if str(A) in self._distance_cache.keys():
+                    distance = self._distance_cache[str(A)]
+                else:
+                    distance = func(A, B)
+                    self._distance_cache[str(A)] = distance
+                return distance
+            return _lookup_func
 
     def __init__(self, distance="cosine", k=10):
         distances = {"cosine": cosine, "jaccard": jaccard, "tanimoto": rogerstanimoto}
@@ -312,20 +350,35 @@ class KNN(CrossProjectApproach):
         self.all = None
 
     def __call__(self, model: 'CrossProjectModel'):
-        all = np.array([train_project.get_set() for train_project in model.train_projects])
-        self.all = [
-            all,  # row -> (x_train, y_train)
-            np.array(map(lambda x: x[0], all))  # row -> x_train
-        ]
+        self.train_dataset = self.TrainingDataset(model.train_projects, self.distance, k=self.k)
         X_test, y_test = model.target_project.get_set()
-        train = reduce(self.top_k, X_test)
+        [self.train_dataset.select_top_k(test_row) for test_row in X_test]
+        X_train, y_train = self.train_dataset.selected
+        self.classifiers = [sublist for item in self.classifiers for sublist in item]
+        configurations = product(self.classifiers, model.evaluators)
+        return [(
+            model.target_project.name,  # target_project name
+            str(self.__class__.__name__),  # approach name
+            f'k={self.k} top instances for each row',  # train_project name
+            configuration[0][0].__name__,  # classifier
+            configuration[0][1],  # classifier configuration
+            configuration[1].__name__,  # evaluator
+            self.evaluate(X_train, y_train, X_test, y_test,  # dataset
+                          configuration[0][0], configuration[0][1],  # classifier
+                          configuration[1]))  # evaluator
+            for configuration in configurations]
 
-    def top_k(self, row):
-        calculate_distance_row = partial(self.calculate_distance, A=row)
-        distances = np.apply_along_axis(calculate_distance_row, 1, self.all[1])
-
-    def calculate_distance(self, A, B):
-        return self.distance(A, B)
+    @staticmethod
+    def evaluate(target_project_name,
+                 X_train, y_train, X_test, y_test,
+                 classifier, classifier_config,
+                 evaluator):
+        oversample = OverSample()
+        X_train, y_train = oversample(X_train, y_train)
+        X_test, y_test = oversample(X_test, y_test)
+        y_pred = Classifier(f'KNN: {target_project_name}', classifier, classifier_config).fit(X_train, y_train).predict(
+            X_test)
+        return evaluator(y_test, y_pred)
 
 
 class Clustering(CrossProjectApproach):
