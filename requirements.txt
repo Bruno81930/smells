@@ -2,3 +2,5 @@ toolz
 pandas
 scikit-learn
 pytest
+imbalanced-learn
+scipy
