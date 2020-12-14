@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from abc import ABC, abstractmethod
 from collections import namedtuple
 from csv import DictReader
 from enum import Enum, auto
@@ -186,19 +187,43 @@ class Dataset:
         return f'Dataset(X_train{list(self._training["X"].shape)}, y_train{list(self._training["y"].shape)}, X_test{list(self._testing["X"].shape)}, y_test{list(self._testing["y"].shape)}, {repr(self.context)})'
 
 
+class Singleton(type):
+    _instances = {}
+
+    def __call__(cls, *args, **kwargs):
+        if cls not in cls._instances:
+            cls._instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
+        return cls._instances[cls]
+
+
+class MemoryCache(metaclass=Singleton):
+    def __init__(self):
+        if not hasattr(self, 'cache'):
+            self.cache = dict()
+
+    def __getitem__(self, path) -> Classifier:
+        if path in self.cache.keys():
+            return self.cache[path]
+        raise KeyError("There is no path in store with that classifier.")
+
+    def __setitem__(self, path: str, classifier: Classifier):
+        assert isinstance(classifier, Classifier), "Classifier not type classifier"
+        self.cache[path] = classifier
+
+
 class ModelCache:
     def __init__(self, classifier: Classifier, context: Context):
         self._classifier = classifier
         self.context = context
         self._path: Path = self.path()
-        self._cached = False
+        self._cached = {'disk': False, 'memory': False}
 
     @property
     def classifier(self):
         return self._classifier()
 
     def __call__(self):
-        return self._cached
+        return self._cached['disk']
 
     def path(self):
         dir_path = Path(Path(__file__).parent, "data", "cache", str(self.context))
@@ -206,15 +231,31 @@ class ModelCache:
         path = Path(dir_path, f'{str(self._classifier)}.joblib')
         return path
 
+    def load(self, path):
+        try:
+            classifier = MemoryCache()[path]
+            self._cached['memory'] = True
+            return classifier
+        except KeyError:
+            return load(path)
+
+    def dump(self, classifier, path):
+        if not self._cached['disk']:
+            dump(classifier, path)
+            MemoryCache()[path] = classifier
+
+        if self._cached['disk'] and not self._cached['memory']:
+            MemoryCache()[path] = classifier
+
     def __enter__(self):
         if self._path.exists():
-            self._cached = True
-            self._classifier = load(self._path)
+            self._cached['disk'] = True
+            self._classifier = self.load(self._path)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if not exc_type and not self._cached:
-            dump(self._classifier, self._path)
+        if not exc_type:
+            self.dump(self._classifier, self._path)
             return False
         return True
 
@@ -308,7 +349,7 @@ class Standard(CrossProjectApproach):
         return model(dataset)
 
 
-class Normalization(CrossProjectApproach):
+class Normalization(CrossProjectApproach, ABC):
     """
     Source
     ===
@@ -316,10 +357,6 @@ class Normalization(CrossProjectApproach):
     in Proceedings of the 4th international workshop on Predictor models in software engineering  -
     PROMISE ’08, Leipzig, Germany, 2008, p. 19, doi: 10.1145/1370788.1370794.
     """
-
-    def __init__(self, compensate="train"):
-        assert compensate in ["train", "target"]
-        self.compensate = compensate
 
     def __call__(self, model: 'CrossProjectModel'):
         classifiers = [Classifier(*classifier) for classifier in model.classifiers]
@@ -337,36 +374,55 @@ class Normalization(CrossProjectApproach):
                                      configuration.evaluator))
             for configuration in configurations]
 
-    def normalization(self, train_project: Project, target_project: Project, classifier: Classifier, evaluator: Callable):
+    def normalization(self, train_project: Project, target_project: Project, classifier: Classifier,
+                      evaluator: Callable):
         X_train, y_train = train_project.get_set(strategy="all")
         X_test, y_test = target_project.get_set(strategy="all")
+
         X_train = self.encode(X_train)
         X_test = self.encode(X_test)
 
-        def compensate_column(A: List[int], B: List[int]):
-            AVG_A = np.mean(A)
-            AVG_A = 10e-10 if AVG_A == 0 else AVG_A
-            AVG_B = np.mean(B)
-            return [(a * AVG_B) / AVG_A for a in A]
-
-        if self.compensate == 'target':
-            X_test = np.array(
-                [compensate_column(A=X_test.T[column], B=X_train.T[column]) for column in range(X_test.shape[1])]).T
-        else:
-            X_train = np.array(
-                [compensate_column(A=X_train.T[column], B=X_test.T[column]) for column in range(X_train.shape[1])]).T
+        X_train, X_test = self.compensate(X_train, X_test)
 
         X_train = StandardScaler().fit_transform(X_train)
         X_test = StandardScaler().fit_transform(X_test)
 
         context = Context(train_project.name, target_project.name, self.__class__.__name__)
+
         dataset = Dataset(X_train, y_train, X_test, y_test, context)
         model = Model(classifier, evaluator, context)
         return model(dataset)
 
+    @abstractmethod
+    def compensate(self, X_train, Y_test):
+        pass
+
     @staticmethod
     def encode(data_set: List[List]):
         return PCA().fit_transform(data_set)
+
+    @staticmethod
+    def compensate_column(A: List[int], B: List[int]):
+        AVG_A = np.mean(A)
+        AVG_A = 10e-10 if AVG_A == 0 else AVG_A
+        AVG_B = np.mean(B)
+        return [(a * AVG_B) / AVG_A for a in A]
+
+
+class TestSetNormalization(Normalization):
+    def compensate(self, X_train, X_test):
+        X_test = np.array(
+            [self.compensate_column(A=X_test.T[column], B=X_train.T[column])
+             for column in range(X_test.shape[1])]).T
+        return X_train, X_test
+
+
+class TrainSetNormalization(Normalization):
+    def compensate(self, X_train, X_test):
+        X_train = np.array(
+            [self.compensate_column(A=X_train.T[column], B=X_test.T[column])
+             for column in range(X_train.shape[1])]).T
+        return X_train, X_test
 
 
 class KNN(CrossProjectApproach):
@@ -657,7 +713,7 @@ class Configuration:
         projects = list(filter(lambda project: project != target_project_name, self.projects))
         train_projects = list(map(lambda name: self.datasets[name], projects))
         target_project = self.datasets[target_project_name]
-        rows = CrossProjectModel(train_projects, target_project, self.classifiers, self.evaluators)([Normalization()])
+        rows = CrossProjectModel(train_projects, target_project, self.classifiers, self.evaluators)()
         self.store_results(rows)
 
 
