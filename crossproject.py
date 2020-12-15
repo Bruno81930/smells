@@ -145,7 +145,10 @@ class OverSample:
             self._run = self.smote
 
     def __call__(self, X, y):
-        return self._run(X, y, self.args)
+        try:
+            return self._run(X, y, self.args)
+        except ValueError:
+            return X, y
 
     @staticmethod
     def smote(X, y, args):
@@ -268,10 +271,10 @@ class Model:
         self.oversample = OverSample()
 
     def __call__(self, dataset: Dataset) -> Number:
-        X_train, y_train = self.oversample(*dataset.training)
-        X_test, y_test = self.oversample(*dataset.testing)
+        X_test, y_test = dataset.testing
         with ModelCache(self.classifier, self.context) as cache:
             if not cache():
+                X_train, y_train = self.oversample(*dataset.training)
                 cache.classifier.fit(X_train, y_train)
             y_pred = cache.classifier.predict(X_test)
             return self.evaluator(y_test, y_pred)
@@ -462,15 +465,15 @@ class KNN(CrossProjectApproach):
             self._selected_X.append(X)
             self._selected_y.append(y)
 
-        @property
-        def selected(self):
-            return np.array(self._selected_X), np.array(self._selected_y)
-
         def select_top_k(self, B):
             distances = np.array([self.calculate_distance(A.tobytes(), B.tobytes()) for A in self.X])
             indices = sorted(np.argpartition(distances, -self.k)[-self.k:],
                              reverse=True)  # get indices for top and sort in reverse order
             [self.append(*self.pop(index)) for index in indices]
+
+        def __call__(self, from_testing_rows):
+            [self.select_top_k(test_row) for test_row in from_testing_rows]
+            return np.array(self._selected_X), np.array(self._selected_y)
 
         @lru_cache
         def calculate_distance(self, A, B):
@@ -486,34 +489,22 @@ class KNN(CrossProjectApproach):
     def __call__(self, model: 'CrossProjectModel'):
         self.train_dataset = self.TrainingDataset(model.train_projects, self.distance, k=self.k)
         X_test, y_test = model.target_project.get_set()
-        [self.train_dataset.select_top_k(test_row) for test_row in X_test]
-        X_train, y_train = self.train_dataset.selected
-        self.classifiers = [sublist for item in self.classifiers for sublist in item]
-        configurations = product(self.classifiers, model.evaluators)
+        X_train, y_train = self.train_dataset(X_test)
+        train_project_name = f'k={self.k} top instances for each row'
+        context = Context(train_project_name, model.target_project.name, self.__class__.__name__)
+        dataset = Dataset(X_train, y_train, X_test, y_test, context)
+        classifiers = [Classifier(*classifier) for classifier in model.classifiers]
+        configurations = Configurations(classifiers, model.evaluators)
+
         return [Row(
             target_project=model.target_project.name,
             approach=str(self.__class__.__name__),
             train_project=f'k={self.k} top instances for each row',
-            classifier=configuration[0][0].__name__,
-            classifier_configuration=configuration[0][1],
-            evaluator=configuration[1].__name__,
-            score=self.evaluate(model.target_project.name,
-                                X_train, y_train, X_test, y_test,
-                                configuration[0][0], configuration[0][1],
-                                configuration[1], ))
+            classifier=configuration.classifier.name,
+            classifier_configuration=configuration.classifier.configuration,
+            evaluator=configuration.evaluator,
+            score=Model(configuration.classifier, configuration.evaluator, context)(dataset))
             for configuration in configurations]
-
-    @staticmethod
-    def evaluate(target_project_name,
-                 X_train, y_train, X_test, y_test,
-                 classifier, classifier_config,
-                 evaluator):
-        oversample = OverSample()
-        X_train, y_train = oversample(X_train, y_train)
-        X_test, y_test = oversample(X_test, y_test)
-        y_pred = Classifier(f'KNN: {target_project_name}', classifier, classifier_config).fit(X_train, y_train).predict(
-            X_test)
-        return evaluator(y_test, y_pred)
 
 
 class Clustering(CrossProjectApproach):
@@ -543,41 +534,35 @@ class BestOfBreed(CrossProjectApproach):
         self.breed_evaluator = breed_evaluator
 
     def __call__(self, model: 'CrossProjectModel'):
-        self.training_projects = model.train_projects
-        self.target_project = model.target_project
-        self.classifiers = [[(classifier, conf) for conf in model.classifiers[classifier]] for classifier in
-                            model.classifiers]
-        self.classifiers = [sublist for item in self.classifiers for sublist in item]
-        self.evaluators = model.evaluators
-        self.scores = dict([self.evaluate_breed(train_project) for train_project in self.training_projects])
-        self.best_breed = max(self.scores.items(), key=itemgetter(1))[0]
-        self.configurations = product(self.classifiers, self.evaluators)
+        classifiers = [Classifier(*classifier) for classifier in model.classifiers]
+        configurations = Configurations(classifiers, model.evaluators)
+        best_breed = self.evaluate_breed(model.train_projects, model.target_project, classifiers)
         return [Row(
-            target_project=self.target_project.name,
+            target_project=model.target_project.name,
             approach=str(self.__class__.__name__),
-            train_project=self.best_breed.name,
-            classifier=configuration[0][0].__name__,
-            classifier_configuration=configuration[0][1],
-            evaluator=configuration[1].__name__,
-            score=self.evaluate(self.best_breed,
-                                Classifier(self.best_breed.name, configuration[0][0], configuration[0][1]),
-                                configuration[1]))
-            for configuration in self.configurations]
+            train_project=best_breed.context.train_project,
+            classifier=configuration.classifier.name,
+            classifier_configuration=configuration.classifier.configuration,
+            evaluator=configuration.evaluator.__name__,
+            score=Model(configuration.classifier, configuration.evaluator, best_breed.context)(best_breed))
+            for configuration in configurations]
 
-    def evaluate_breed(self, train_project: Project):
-        X_train, y_train = train_project.get_set(strategy="all")
-        X_test, y_test = self.target_project.get_set(strategy="all")
-        classifiers = [Classifier(train_project.name, classifier[0], classifier[1]) for classifier in self.classifiers]
-        [classifier.fit(X_train, y_train) for classifier in classifiers]
-        y_preds = [classifier.predict(X_test) for classifier in classifiers]
-        breed_score = np.mean([self.breed_evaluator(y_test, y_pred) for y_pred in y_preds])
-        return train_project, breed_score
+    def evaluate_breed(self, train_projects: List[Project], target_project: Project, classifiers: List[Classifier]) -> Dataset:
+        train_sets = {train_project.name: train_project.get_set(strategy="all") for train_project in train_projects}
+        X_test, y_test = target_project.get_set(strategy="all")
+        datasets = [Dataset(*train_sets[train_project],
+                            X_test,
+                            y_test,
+                            Context(train_project, target_project.name, self.__class__.__name__))
+                    for train_project in train_sets.keys()]
+        models = {dataset: [Model(classifier, self.breed_evaluator, dataset.context)
+                            for classifier in classifiers]
+                  for dataset in datasets}
 
-    def evaluate(self, train_project: Project, classifier: Classifier, evaluator: Callable):
-        X_train, y_train = train_project.get_set(strategy="all")
-        X_test, y_test = self.target_project.get_set(strategy="all")
-        y_pred = classifier.fit(X_train, y_train).predict(X_test)
-        return evaluator(y_test, y_pred)
+        scores = {dataset: np.mean(list(map(lambda model: model(dataset), models[dataset])))
+                  for dataset in models.keys()}
+
+        return max(scores, key=scores.get)
 
 
 class ProfileDriven(CrossProjectApproach):
@@ -713,7 +698,7 @@ class Configuration:
         projects = list(filter(lambda project: project != target_project_name, self.projects))
         train_projects = list(map(lambda name: self.datasets[name], projects))
         target_project = self.datasets[target_project_name]
-        rows = CrossProjectModel(train_projects, target_project, self.classifiers, self.evaluators)()
+        rows = CrossProjectModel(train_projects, target_project, self.classifiers, self.evaluators)([BestOfBreed()])
         self.store_results(rows)
 
 
