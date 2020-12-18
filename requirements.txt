@@ -4,3 +4,5 @@ scikit-learn
 pytest
 imbalanced-learn
 scipy
+kneed
+python-json-logger
