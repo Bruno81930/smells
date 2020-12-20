@@ -1,12 +1,20 @@
 import logging
 import os
+import sys
 import time
+import traceback
 from abc import ABC, abstractmethod
 from collections import namedtuple
 from csv import DictReader
+from email import encoders
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from enum import Enum, auto
 from functools import partial, lru_cache
+from importlib import import_module
 from itertools import product
+from multiprocessing.context import Process
 from numbers import Number
 from operator import itemgetter
 from pathlib import Path
@@ -116,7 +124,7 @@ class Row:
             yield element
 
     def __str__(self):
-        return ','.join(self.elements)
+        return ','.join(map(str, self.elements))
 
 
 class Classifier:
@@ -358,7 +366,7 @@ class All(CrossProjectApproach):
 class Standard(CrossProjectApproach):
     def __call__(self, model: 'CrossProjectModel'):
         logging.getLogger(OutputCache().path).debug(
-            f'Starting Approach Standard => Target Project {model.target_project}')
+            f'Starting Approach Standard => Target Project {model.target_project.name}')
         classifiers = [Classifier(*classifier) for classifier in model.classifiers]
         configurations = Configurations(classifiers, model.evaluators, model.train_projects)
         return [Row(
@@ -374,7 +382,7 @@ class Standard(CrossProjectApproach):
 
     def evaluate(self, classifier: Classifier, evaluator, target_project, train_project):
         logging.getLogger(OutputCache().path).debug(
-            f'Evaluating Model on Standard for Training Project: {train_project}, Target Project: {target_project}, '
+            f'Evaluating Model on Standard for Training Project: {train_project.name}, Target Project: {target_project.name}, '
             f'Classifier: {classifier.name} and Evaluator: {evaluator.__name__} '
         )
         context = Context(train_project=train_project.name, target_project=target_project.name,
@@ -402,7 +410,7 @@ class Normalization(CrossProjectApproach, ABC):
 
     def __call__(self, model: 'CrossProjectModel'):
         logging.getLogger(OutputCache().path).debug(
-            f'Starting Approach Normalization => Target Project {model.target_project}')
+            f'Starting Approach Normalization => Target Project {model.target_project.name}')
 
         classifiers = [Classifier(*classifier) for classifier in model.classifiers]
         configurations = Configurations(classifiers, model.evaluators, model.train_projects)
@@ -422,7 +430,7 @@ class Normalization(CrossProjectApproach, ABC):
     def normalization(self, train_project: Project, target_project: Project, classifier: Classifier,
                       evaluator: Callable):
         logging.getLogger(OutputCache().path).debug(
-            f'Applying Normalization for Training Project: {train_project}, Target Project: {target_project}, '
+            f'Applying Normalization for Training Project: {train_project.name}, Target Project: {target_project.name}, '
             f'Classifier: {classifier.name} and Evaluator: {evaluator.__name__} '
         )
         X_train, y_train = train_project.get_set(strategy="all")
@@ -562,7 +570,7 @@ class KNN(CrossProjectApproach):
             [self.select_top_k(test_row) for test_row in from_testing_rows]
             return np.array(self._selected_X), np.array(self._selected_y)
 
-        @lru_cache
+        @lru_cache(maxsize=None)
         def _calculate_distance(self, A, B):
             return self.distance(np.frombuffer(A, dtype=int), np.frombuffer(B, dtype=int))
 
@@ -618,7 +626,7 @@ class BestOfBreed(CrossProjectApproach):
 
     def __call__(self, model: 'CrossProjectModel'):
         logging.getLogger(OutputCache().path).debug(
-            f'Starting Approach BestOfBreed => Target Project {model.target_project}')
+            f'Starting Approach BestOfBreed => Target Project {model.target_project.name}')
 
         classifiers = [Classifier(*classifier) for classifier in model.classifiers]
         configurations = Configurations(classifiers, model.evaluators)
@@ -692,12 +700,25 @@ class CrossProjectModel:
     def __call__(self, approaches: Union[List[CrossProjectApproach], CrossProjectApproach] = All()):
         def catch(func, *args, **kwargs):
             try:
-                raise Exception
                 return func(*args, **kwargs)
-            except Exception:
-                logging.getLogger(OutputCache().path).error(
-                    f'Exception. Target Project={self.target_project.name}. Approach={func.__class__.__name__}'
+            except Exception as e:
+                dataset = OutputCache().path
+                approach = func.__class__.__name__
+                target_project = self.target_project.name
+                logging.getLogger(dataset).error(
+                    f'Exception. Target Project={target_project}. Approach={approach}'
                 )
+                with EmailNotification(
+                    dataset,
+                    approach=approach,
+                    target_project=target_project,
+                    exception_msg=e,
+                    exception_type=sys.exc_info()[0],
+                    exception_value=sys.exc_info()[1],
+                    exception_tb=sys.exc_info()[2]
+                ) as en:
+                    en(*en.create_error())
+
                 return []
 
         if isinstance(approaches, All):
@@ -802,6 +823,152 @@ class Logger:
                 log_record['level'] = record.levelname
 
 
+try:
+    from notifications import EmailNotificationBase
+
+
+    class EmailNotification(EmailNotificationBase):
+        def __init__(self, dataset, approach=None, target_project=None, exception_msg=None, exception_type=None,
+                     exception_value=None,
+                     exception_tb=None, log_tail=50):
+            super().__init__()
+            self.dataset = dataset
+            self.approach = approach
+            self.target_project = target_project
+            self.exception_msg = exception_msg
+            self.exception_type = exception_type
+            self.exception_value = exception_value
+            self.exception_tb = exception_tb
+            self.log_tail = log_tail
+            self.message_time = str(datetime.now())
+
+        def create_error(self):
+            nt = self.NotificationType.ERROR
+            subject = f"[{self.message_time}] {nt.type}: Dataset={self.dataset}  Approach={self.approach}  Target={self.target_project}"
+            content = f"[{nt.type}]\n" + self._create_meta(nt) + self._create_exception(nt) + self._create_logs()
+            return subject, content
+
+        def create_critical(self):
+            nt = self.NotificationType.CRITICAL
+            subject = f"[{self.message_time}] {nt.type}: Dataset={self.dataset}"
+            content = f"[{nt.type}]\n" + self._create_meta(nt) + self._create_exception(nt) + self._create_logs()
+            return subject, content
+
+        def create_success(self):
+            nt = self.NotificationType.SUCCESS
+            subject = f"[{self.message_time}] {nt.type}: Dataset={self.dataset} Target={self.target_project}"
+            content = f"[{nt.type}]\n" + self._create_meta(nt)
+            return subject, content
+
+        class NotificationType(Enum):
+
+            ERROR = auto(), "ERROR"
+            CRITICAL = auto(), "CRITICAL"
+            SUCCESS = auto(), "SUCCESS"
+
+            @property
+            def type(self):
+                return self.value[1]
+
+        def _create_meta(self, notification_type: NotificationType):
+            content = f"""
+            Time: {self.message_time}
+            Dataset: {self.dataset}
+            """
+            if notification_type == self.NotificationType.CRITICAL:
+                content += "---\n\n"
+                return content
+
+            content += f"""
+            Approach: {self.approach}
+            Target Project: {self.target_project}\n
+            ---\n
+            """
+
+            return content
+
+        def _create_exception(self, notification_type: NotificationType):
+            if notification_type != self.NotificationType.ERROR and notification_type != self.NotificationType.CRITICAL:
+                return
+
+            frames = traceback.extract_tb(self.exception_tb)
+            frames = "\n".join([self._print_frame(frame[0] + 1, frame[1]) for frame in enumerate(frames)])
+
+            return f"""
+            Exception:
+                Exception Name: {self.exception_type.__name__}
+                Exception Values: {str(self.exception_value)}
+                Exception Message: {self.exception_msg}\n
+                Exception Frames {frames} 
+            ---\n
+            """
+
+        def _create_logs(self):
+            log_lines = []
+            try:
+                log_path = logging.getLogger(self.dataset).handlers[0].baseFilename
+                with open(log_path, 'r') as log:
+                    log_lines.extend(log.readlines()[-self.log_tail:])
+            except:
+                pass
+            log_lines = '\n\t\t'.join(log_lines)
+            return f"""
+            Logs:
+                {log_lines}
+            """
+
+        @staticmethod
+        def _print_frame(number, frame: traceback.FrameSummary):
+            return f"""
+                    [Frame #{number}]
+                    Name: {frame.name}
+                    FileName: {frame.filename}
+                    Line: {frame.line}
+                    Line Number: {str(frame.lineno)}
+                    ----------- 
+                    
+               """
+
+        def __call__(self, subject, content):
+            self.payload = None
+            self._create_payload()
+
+            self.message = MIMEMultipart()
+            self._write_message(subject, content)
+
+            text = self.message.as_string()
+            self.server.sendmail(self.email, self.email, text)
+
+        def _create_payload(self):
+            try:
+                attach_file_path = logging.getLogger(self.dataset).handlers[0].baseFilename
+                attach_file_name = Path(attach_file_path).name
+                attach_file = open(attach_file_path, 'rb')
+                self.payload = MIMEBase('application', 'octate-stream')
+                self.payload.set_payload(attach_file.read())
+                encoders.encode_base64(self.payload)
+                self.payload.add_header('Content-Disposition', 'attachment', filename=attach_file_name)
+            except:
+                self.payload = None
+
+        def _write_message(self, subject, content):
+            self.message['From'] = self.email
+            self.message['To'] = self.email
+            self.message['Subject'] = subject
+            self.message.attach(MIMEText(content, 'plain'))
+            if self.payload is not None:
+                self.message.attach(self.payload)
+
+
+except ImportError:
+    class EmailNotification:
+        def create_error(self, *args, **kwargs):
+            pass
+
+        def __call__(self, *args, **kwargs):
+            pass
+
+
 class StoreResults:
     def __init__(self, out_path=Path(Path(__file__).parent, "out")):
         self.out_path = out_path
@@ -869,10 +1036,43 @@ class Configuration:
         target_project = self.datasets[target_project_name]
         rows = CrossProjectModel(train_projects, target_project, self.classifiers, self.evaluators)(
             self.dataset.approaches)
+        with EmailNotification(self.dataset, approach="General", target_project=target_project_name) as en:
+            en(*en.create_success())
+
         self.store_results(rows)
 
 
 if __name__ == '__main__':
-    c = iter(Configuration(DatasetConfiguration.Smells))
-    next(c)()
-    pass
+    def run_smells():
+        try:
+            list(Configuration(DatasetConfiguration.Smells))
+        except Exception as e:
+            with EmailNotification(
+                    "smells",
+                    exception_msg=e,
+                    exception_type=sys.exc_info()[0],
+                    exception_value=sys.exc_info()[1],
+                    exception_tb=sys.exc_info()[2]
+            ) as en:
+                en(*en.create_critical())
+
+
+    def run_metrics():
+        try:
+            list(Configuration(DatasetConfiguration.Metrics))
+        except Exception as e:
+            with EmailNotification(
+                    "metrics", exception_msg=e,
+                    exception_type=sys.exc_info()[0],
+                    exception_value=sys.exc_info()[1],
+                    exception_tb=sys.exc_info()[2]
+            ) as en:
+                en(*en.create_critical())
+
+
+    p1 = Process(target=run_smells())
+    p1.start()
+    p2 = Process(target=run_metrics())
+    p2.start()
+    p1.join()
+    p2.join()
