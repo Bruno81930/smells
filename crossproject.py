@@ -1,4 +1,5 @@
 import logging
+import multiprocessing
 import os
 import sys
 import time
@@ -6,20 +7,18 @@ import traceback
 from abc import ABC, abstractmethod
 from collections import namedtuple
 from csv import DictReader
+from datetime import datetime
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from enum import Enum, auto
 from functools import partial, lru_cache
-from importlib import import_module
-from itertools import product
-from multiprocessing.context import Process
+from itertools import product, chain
+from multiprocessing import Pool
 from numbers import Number
-from operator import itemgetter
 from pathlib import Path
 from typing import Tuple, Dict, ClassVar, Union, List, Callable
-from datetime import datetime
 
 import numpy as np
 from imblearn.over_sampling import SMOTE
@@ -153,10 +152,10 @@ class Classifier:
 
 
 class OverSample:
-    def __init__(self, type="smote", args=None):
-        assert type in ["smote"]
+    def __init__(self, otype="smote", args=None):
+        assert otype in ["smote"]
         self.args = dict() if args is None else args
-        if type == "smote":
+        if otype == "smote":
             self._run = self.smote
 
     def __call__(self, X, y):
@@ -171,7 +170,8 @@ class OverSample:
 
 
 class Context:
-    def __init__(self, train_project: str, target_project: str, approach: str):
+    def __init__(self, dataset: str, train_project: str, target_project: str, approach: str):
+        self.dataset = dataset
         self.train_project = train_project
         self.target_project = target_project
         self.approach = approach
@@ -203,7 +203,7 @@ class Dataset:
         return self._testing["X"], self._testing['y']
 
     def store(self):
-        dir_path = Path(Path(__file__).parent, "data", "dataset", OutputCache().path,
+        dir_path = Path(Path(__file__).parent, "data", "dataset", self.context.dataset,
                         f'{self.context.approach}_{self.context.train_project}_{self.context.target_project}')
         dir_path.mkdir(exist_ok=True, parents=True)
         np.savetxt(Path(dir_path, "X_train.csv"), self._training['X'], delimiter=",", fmt="%s")
@@ -239,19 +239,6 @@ class MemoryCache(metaclass=Singleton):
         self.cache[path] = classifier
 
 
-class OutputCache(metaclass=Singleton):
-    def __init__(self):
-        self._path = None
-
-    @property
-    def path(self):
-        return self._path
-
-    @path.setter
-    def path(self, value):
-        self._path = value
-
-
 class ModelCache:
     def __init__(self, classifier: Classifier, context: Context):
         self._classifier = classifier
@@ -267,7 +254,7 @@ class ModelCache:
         return self._cached['disk']
 
     def path(self):
-        dir_path = Path(Path(__file__).parent, "data", "cache", OutputCache().path, str(self.context))
+        dir_path = Path(Path(__file__).parent, "data", "cache", self.context.dataset, str(self.context))
         dir_path.mkdir(exist_ok=True, parents=True)
         path = Path(dir_path, f'{str(self._classifier)}.joblib')
         return path
@@ -327,10 +314,10 @@ class Configurations:
         self._evaluators = evaluators
         self._train_projects = train_projects
 
-        configurations = (classifiers,
-                          evaluators,
-                          train_projects) if train_projects is not None else (classifiers, evaluators)
-        self._configurations = product(*configurations)
+        self.configurations = (classifiers,
+                               evaluators,
+                               train_projects) if train_projects is not None else (classifiers, evaluators)
+        self._configurations = product(*self.configurations)
 
     def __iter__(self):
         for configuration in self._configurations:
@@ -365,10 +352,11 @@ class All(CrossProjectApproach):
 
 class Standard(CrossProjectApproach):
     def __call__(self, model: 'CrossProjectModel'):
-        logging.getLogger(OutputCache().path).debug(
+        self.logger = model.logger
+        self.logger.debug(
             f'Starting Approach Standard => Target Project {model.target_project.name}')
         classifiers = [Classifier(*classifier) for classifier in model.classifiers]
-        configurations = Configurations(classifiers, model.evaluators, model.train_projects)
+        self.configurations = Configurations(classifiers, model.evaluators, model.train_projects)
         return [Row(
             target_project=model.target_project.name,
             approach=str(self.__class__.__name__),
@@ -377,15 +365,15 @@ class Standard(CrossProjectApproach):
             classifier_configuration=configuration.classifier.configuration,
             evaluator=configuration.evaluator.__name__,
             score=self.evaluate(configuration.classifier, configuration.evaluator,
-                                model.target_project, configuration.train_project))
-            for configuration in configurations]
+                                model.target_project, configuration.train_project, model.dataset))
+            for configuration in self.configurations]
 
-    def evaluate(self, classifier: Classifier, evaluator, target_project, train_project):
-        logging.getLogger(OutputCache().path).debug(
+    def evaluate(self, classifier: Classifier, evaluator, target_project, train_project, dataset):
+        self.logger.debug(
             f'Evaluating Model on Standard for Training Project: {train_project.name}, Target Project: {target_project.name}, '
             f'Classifier: {classifier.name} and Evaluator: {evaluator.__name__} '
         )
-        context = Context(train_project=train_project.name, target_project=target_project.name,
+        context = Context(dataset=dataset, train_project=train_project.name, target_project=target_project.name,
                           approach=self.__class__.__name__)
 
         model = Model(classifier, evaluator, context)
@@ -409,11 +397,12 @@ class Normalization(CrossProjectApproach, ABC):
         self.encoding = encoding
 
     def __call__(self, model: 'CrossProjectModel'):
-        logging.getLogger(OutputCache().path).debug(
+        self.logger = model.logger
+        self.logger.debug(
             f'Starting Approach Normalization => Target Project {model.target_project.name}')
 
         classifiers = [Classifier(*classifier) for classifier in model.classifiers]
-        configurations = Configurations(classifiers, model.evaluators, model.train_projects)
+        self.configurations = Configurations(classifiers, model.evaluators, model.train_projects)
 
         return [Row(
             target_project=model.target_project.name,
@@ -424,12 +413,12 @@ class Normalization(CrossProjectApproach, ABC):
             evaluator=configuration.evaluator.__name__,
             score=self.normalization(configuration.train_project, model.target_project,
                                      configuration.classifier,
-                                     configuration.evaluator))
-            for configuration in configurations]
+                                     configuration.evaluator, model.dataset))
+            for configuration in self.configurations]
 
     def normalization(self, train_project: Project, target_project: Project, classifier: Classifier,
-                      evaluator: Callable):
-        logging.getLogger(OutputCache().path).debug(
+                      evaluator: Callable, dataset: str):
+        self.logger.debug(
             f'Applying Normalization for Training Project: {train_project.name}, Target Project: {target_project.name}, '
             f'Classifier: {classifier.name} and Evaluator: {evaluator.__name__} '
         )
@@ -444,7 +433,7 @@ class Normalization(CrossProjectApproach, ABC):
         X_train = StandardScaler().fit_transform(X_train)
         X_test = StandardScaler().fit_transform(X_test)
 
-        context = Context(train_project.name, target_project.name, self.__class__.__name__)
+        context = Context(dataset, train_project.name, target_project.name, self.__class__.__name__)
 
         dataset = Dataset(X_train, y_train, X_test, y_test, context)
         model = Model(classifier, evaluator, context)
@@ -499,12 +488,14 @@ class KNN(CrossProjectApproach):
 
     class TrainingDatasetSelector:
 
-        def __init__(self, train_projects: List[Project], distance: Callable, k: int = 10):
+        def __init__(self, dataset, train_projects: List[Project], distance: Callable, logger, k: int = 10):
             self.X = [item for sublist in [train_project.get_X() for train_project in train_projects] for item in
                       sublist]
             self.y = [item for sublist in [train_project.get_y() for train_project in train_projects] for item in
                       sublist]
+            self.dataset = dataset
             self.distance: Callable = distance
+            self.logger = logger
             self.k: int = k
             self.cluster = self.Cluster(self.X)
             self._selected_X = list()
@@ -566,7 +557,7 @@ class KNN(CrossProjectApproach):
             [self.append(*self.pop(index)) for index in indices]
 
         def __call__(self, from_testing_rows):
-            logging.getLogger(OutputCache().path).debug("KNN Selecting from testing rows")
+            self.logger.debug("KNN Selecting from testing rows")
             [self.select_top_k(test_row) for test_row in from_testing_rows]
             return np.array(self._selected_X), np.array(self._selected_y)
 
@@ -575,17 +566,17 @@ class KNN(CrossProjectApproach):
             return self.distance(np.frombuffer(A, dtype=int), np.frombuffer(B, dtype=int))
 
     def __call__(self, model: 'CrossProjectModel'):
-        logging.getLogger(OutputCache().path).debug(
-            f'Starting Approach KNN => Target Project {model.target_project}')
+        model.logger.debug(
+            f'Starting Approach KNN => Target Project {model.target_project.name}')
 
-        self.train_dataset = self.TrainingDatasetSelector(model.train_projects, self.distance, k=self.k)
+        self.train_dataset = self.TrainingDatasetSelector(model.dataset, model.train_projects, self.distance, k=self.k)
         X_test, y_test = model.target_project.get_set()
         X_train, y_train = self.train_dataset(X_test)
         train_project_name = f'k={self.k} top instances for each row'
-        context = Context(train_project_name, model.target_project.name, self.__class__.__name__)
+        context = Context(model.dataset, train_project_name, model.target_project.name, self.__class__.__name__)
         dataset = Dataset(X_train, y_train, X_test, y_test, context)
         classifiers = [Classifier(*classifier) for classifier in model.classifiers]
-        configurations = Configurations(classifiers, model.evaluators)
+        self.configurations = Configurations(classifiers, model.evaluators)
 
         return [Row(
             target_project=model.target_project.name,
@@ -595,7 +586,7 @@ class KNN(CrossProjectApproach):
             classifier_configuration=configuration.classifier.configuration,
             evaluator=configuration.evaluator,
             score=Model(configuration.classifier, configuration.evaluator, context)(dataset))
-            for configuration in configurations]
+            for configuration in self.configurations]
 
 
 class Clustering(CrossProjectApproach):
@@ -625,13 +616,13 @@ class BestOfBreed(CrossProjectApproach):
         self.breed_evaluator = breed_evaluator
 
     def __call__(self, model: 'CrossProjectModel'):
-        logging.getLogger(OutputCache().path).debug(
+        model.logger.debug(
             f'Starting Approach BestOfBreed => Target Project {model.target_project.name}')
 
         classifiers = [Classifier(*classifier) for classifier in model.classifiers]
-        configurations = Configurations(classifiers, model.evaluators)
+        self.configurations = Configurations(classifiers, model.evaluators)
         best_breed = self.evaluate_breed(model.train_projects, model.target_project, classifiers)
-        logging.getLogger(OutputCache().path).debug(
+        model.logger.debug(
             f'Best Of Breed Configuration: Train Project{best_breed.context.train_project}, '
             f'Target Project: {best_breed.context.target_project}'
         )
@@ -644,16 +635,16 @@ class BestOfBreed(CrossProjectApproach):
             classifier_configuration=configuration.classifier.configuration,
             evaluator=configuration.evaluator.__name__,
             score=Model(configuration.classifier, configuration.evaluator, best_breed.context)(best_breed))
-            for configuration in configurations]
+            for configuration in self.configurations]
 
-    def evaluate_breed(self, train_projects: List[Project], target_project: Project,
+    def evaluate_breed(self, dataset: str, train_projects: List[Project], target_project: Project,
                        classifiers: List[Classifier]) -> Dataset:
         train_sets = {train_project.name: train_project.get_set(strategy="all") for train_project in train_projects}
         X_test, y_test = target_project.get_set(strategy="all")
         datasets = [Dataset(*train_sets[train_project],
                             X_test,
                             y_test,
-                            Context(train_project, target_project.name, self.__class__.__name__))
+                            Context(dataset, train_project, target_project.name, self.__class__.__name__))
                     for train_project in train_sets.keys()]
         models = {dataset: [Model(classifier, self.breed_evaluator, dataset.context)
                             for classifier in classifiers]
@@ -686,45 +677,50 @@ class ELM(CrossProjectApproach):
 
 
 class CrossProjectModel:
-    def __init__(self, train_projects: List[Project], target_project: Project,
-                 classifiers: List[Tuple], evaluators: List[Callable]):
+    def __init__(self, dataset, train_projects: List[Project], target_project: Project,
+                 classifiers: List[Tuple], evaluators: List[Callable],
+                 logger,
+                 approaches: Union[List[CrossProjectApproach], CrossProjectApproach] = All()):
+        self.dataset = dataset
         self.train_projects = train_projects
         self.target_project = target_project
         self.classifiers = classifiers
         self.evaluators = evaluators
+        self.logger = logger
+        self.approaches = approaches
 
     def __repr__(self):
         return f'CrossProjectModel(train_projects[{len(self.train_projects)}], {self.target_project}, ' \
                f'{self.classifiers}, {self.evaluators})'
 
-    def __call__(self, approaches: Union[List[CrossProjectApproach], CrossProjectApproach] = All()):
+    def __call__(self):
         def catch(func, *args, **kwargs):
             try:
                 return func(*args, **kwargs)
             except Exception as e:
-                dataset = OutputCache().path
                 approach = func.__class__.__name__
                 target_project = self.target_project.name
-                logging.getLogger(dataset).error(
+                self.logger.error(
                     f'Exception. Target Project={target_project}. Approach={approach}'
                 )
                 with EmailNotification(
-                    dataset,
-                    approach=approach,
-                    target_project=target_project,
-                    exception_msg=e,
-                    exception_type=sys.exc_info()[0],
-                    exception_value=sys.exc_info()[1],
-                    exception_tb=sys.exc_info()[2]
+                        self.dataset,
+                        self.logger,
+                        approach=approach,
+                        target_project=target_project,
+                        exception_msg=e,
+                        exception_type=sys.exc_info()[0],
+                        exception_value=sys.exc_info()[1],
+                        exception_tb=sys.exc_info()[2]
                 ) as en:
                     en(*en.create_error())
 
                 return []
 
-        if isinstance(approaches, All):
-            return approaches(self)
+        if isinstance(self.approaches, All):
+            return self.approaches(self)
         else:
-            return [sublist for item in [catch(approach, self) for approach in approaches] for sublist in item]
+            return [sublist for item in [catch(approach, self) for approach in self.approaches] for sublist in item]
 
 
 class Classifiers(Enum):
@@ -782,11 +778,11 @@ class DatasetConfiguration(Enum):
 
 
 class Logger:
-    def __init__(self, dataset: DatasetConfiguration, level=logging.DEBUG):
-        self.dir_path = Path(Path(__file__).parent, "data", "logs", dataset.output)
+    def __init__(self, dataset: str, level=logging.DEBUG):
+        self.dir_path = Path(Path(__file__).parent, "data", "logs", dataset)
         self.dir_path.mkdir(parents=True, exist_ok=True)
         self.time_name = str(datetime.now()).replace(" ", "_")
-        logger = logging.getLogger(dataset.output)
+        logger = logging.getLogger(dataset)
         logger.setLevel(level)
         logger.addHandler(self._json_file_handler())
         logger.addHandler(self._csv_file_handler())
@@ -794,20 +790,20 @@ class Logger:
 
     def _json_file_handler(self):
         json_file_handler = logging.FileHandler(Path(self.dir_path, f'{self.time_name}.json'))
-        json_formatter = Logger.CustomJsonFormatter('%(timestamp)s %(level)s %(name)s %(message)s')
+        json_formatter = Logger.CustomJsonFormatter('%(timestamp)s %(processName)s %(level)s %(name)s %(message)s')
         json_file_handler.setFormatter(json_formatter)
         return json_file_handler
 
     def _csv_file_handler(self):
         csv_file_handler = logging.FileHandler(Path(self.dir_path, f'{self.time_name}.csv'))
-        csv_formatter = logging.Formatter('%(asctime)s,%(name)s,%(message)s')
+        csv_formatter = logging.Formatter('%(asctime)s,%(processName)s,%(name)s,%(message)s')
         csv_file_handler.setFormatter(csv_formatter)
         return csv_file_handler
 
     @staticmethod
     def _log_handler():
         log_handler = logging.StreamHandler()
-        log_formatter = logging.Formatter('%(asctime)s | %(name)s | %(message)s')
+        log_formatter = logging.Formatter('%(asctime)s | %(processName)s | %(name)s | %(message)s')
         log_handler.setFormatter(log_formatter)
         return log_handler
 
@@ -828,11 +824,12 @@ try:
 
 
     class EmailNotification(EmailNotificationBase):
-        def __init__(self, dataset, approach=None, target_project=None, exception_msg=None, exception_type=None,
+        def __init__(self, dataset, logger, approach=None, target_project=None, exception_msg=None, exception_type=None,
                      exception_value=None,
                      exception_tb=None, log_tail=50):
             super().__init__()
             self.dataset = dataset
+            self.logger = logger
             self.approach = approach
             self.target_project = target_project
             self.exception_msg = exception_msg
@@ -906,7 +903,7 @@ try:
         def _create_logs(self):
             log_lines = []
             try:
-                log_path = logging.getLogger(self.dataset).handlers[0].baseFilename
+                log_path = self.logger.handlers[0].baseFilename
                 with open(log_path, 'r') as log:
                     log_lines.extend(log.readlines()[-self.log_tail:])
             except:
@@ -941,7 +938,7 @@ try:
 
         def _create_payload(self):
             try:
-                attach_file_path = logging.getLogger(self.dataset).handlers[0].baseFilename
+                attach_file_path = self.logger.handlers[0].baseFilename
                 attach_file_name = Path(attach_file_path).name
                 attach_file = open(attach_file_path, 'rb')
                 self.payload = MIMEBase('application', 'octate-stream')
@@ -970,19 +967,19 @@ except ImportError:
 
 
 class StoreResults:
-    def __init__(self, out_path=Path(Path(__file__).parent, "out")):
+    def __init__(self, dataset, out_path=Path(Path(__file__).parent, "out")):
         self.out_path = out_path
         Path(out_path).mkdir(exist_ok=True, parents=True)
-        self.path = str(Path(out_path, f'{OutputCache().path}.csv'))
+        self.path = str(Path(out_path, f'{dataset}.csv'))
         self.column_names = ['Target Project', 'Approach', 'Train Project',
                              'Classifier', 'Classifier Configuration', 'Evaluator', 'Value']
-        if os.path.exists(self.path):
+        if not os.path.exists(self.path):
             with open(self.path, 'w') as results_file:
                 results_file.write(",".join(self.column_names) + os.linesep)
 
     def __call__(self, rows: List[Row]):
         with open(self.path, 'a') as results_file:
-            [results_file.write(",".join(str(row)) + os.linesep) for row in rows]
+            [results_file.write(str(row) + os.linesep) for row in rows]
 
 
 def timer(func):
@@ -999,15 +996,13 @@ def timer(func):
 class Configuration:
     def __init__(self, dataset: DatasetConfiguration):
         self.dataset = dataset
-        Logger(dataset)
+        Logger(dataset.output)
         self.logger = logging.getLogger(dataset.output)
         self.data_path = Path(Path(__file__).parent, "data", dataset.path)
         self.datasets = dict()
         self.get_datasets()
-        self.store_results = StoreResults()
-        OutputCache().path = dataset.output
+        self.store_results = StoreResults(self.dataset.output)
 
-    @timer
     def get_datasets(self):
         self.logger.debug("Obtaining datasets.")
         with open(self.data_path, 'r') as read_obj:
@@ -1030,49 +1025,42 @@ class Configuration:
         return self
 
     def __next__(self):
-        target_project_name = self.target_projects.pop(0)
-        projects = list(filter(lambda project: project != target_project_name, self.projects))
-        train_projects = list(map(lambda name: self.datasets[name], projects))
-        target_project = self.datasets[target_project_name]
-        rows = CrossProjectModel(train_projects, target_project, self.classifiers, self.evaluators)(
-            self.dataset.approaches)
-        with EmailNotification(self.dataset, approach="General", target_project=target_project_name) as en:
-            en(*en.create_success())
+        try:
+            target_project_name = self.target_projects.pop(0)
+            projects = list(filter(lambda project: project != target_project_name, self.projects))
+            train_projects = list(map(lambda name: self.datasets[name], projects))
+            target_project = self.datasets[target_project_name]
+            configuration = {"dataset": self.dataset.output, "train_projects": train_projects,
+                             "target_project": target_project,
+                             "classifiers": self.classifiers, "evaluators": self.evaluators, "logger": self.logger,
+                             "approaches": self.dataset.approaches}
+            return configuration
+        except IndexError:
+            raise StopIteration
 
-        self.store_results(rows)
+
+def run_store(config):
+    try:
+        Logger(config["dataset"])
+        config["logger"] = logging.getLogger(config["dataset"])
+        rows = CrossProjectModel(**config)()
+        with EmailNotification(config['dataset'], config['logger'], approach="General",
+                               target_project=config['target_project'].name) as en:
+            en(*en.create_success())
+        StoreResults(config["dataset"])(rows)
+    except Exception as e:
+        with EmailNotification(config['dataset'], config['logger'],
+                               approach="General",
+                               target_project=config['target_project'].name,
+                               exception_msg=e,
+                               exception_type=sys.exc_info()[0],
+                               exception_value=sys.exc_info()[1],
+                               exception_tb=sys.exc_info()[2]) as en:
+            en(*en.create_critical())
 
 
 if __name__ == '__main__':
-    def run_smells():
-        try:
-            list(Configuration(DatasetConfiguration.Smells))
-        except Exception as e:
-            with EmailNotification(
-                    "smells",
-                    exception_msg=e,
-                    exception_type=sys.exc_info()[0],
-                    exception_value=sys.exc_info()[1],
-                    exception_tb=sys.exc_info()[2]
-            ) as en:
-                en(*en.create_critical())
-
-
-    def run_metrics():
-        try:
-            list(Configuration(DatasetConfiguration.Metrics))
-        except Exception as e:
-            with EmailNotification(
-                    "metrics", exception_msg=e,
-                    exception_type=sys.exc_info()[0],
-                    exception_value=sys.exc_info()[1],
-                    exception_tb=sys.exc_info()[2]
-            ) as en:
-                en(*en.create_critical())
-
-
-    p1 = Process(target=run_smells())
-    p1.start()
-    p2 = Process(target=run_metrics())
-    p2.start()
-    p1.join()
-    p2.join()
+    configurations = list(
+        chain(Configuration(DatasetConfiguration.Smells), Configuration(DatasetConfiguration.Metrics)))
+    with Pool() as pool:
+        pool.map(run_store, configurations)
