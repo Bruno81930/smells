@@ -1,5 +1,4 @@
 import logging
-import multiprocessing
 import os
 import sys
 import time
@@ -14,7 +13,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from enum import Enum, auto
 from functools import partial, lru_cache
-from itertools import product, chain
+from itertools import product
 from multiprocessing import Pool
 from numbers import Number
 from pathlib import Path
@@ -32,13 +31,55 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import f1_score, roc_auc_score, precision_score, recall_score, brier_score_loss, fbeta_score
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neural_network import MLPClassifier
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
 
 
+class DatasetCleaner:
+    def __init__(self, X, y):
+        assert isinstance(X, np.ndarray) and isinstance(y, np.ndarray), "sets not numpy arrays"
+        self._X = self.scale_data(self.clean_infs(X))
+        self._y = y
+
+    @staticmethod
+    def _has_inf(column) -> bool:
+        return np.isinf(sum(column))
+
+    @staticmethod
+    def _get_max_value(column):
+        finite_column = np.copy(column)
+        finite_column[finite_column == np.inf] = 0
+        return column, np.max(finite_column)
+
+    @staticmethod
+    def _clear_infs(column, max_value):
+        column[column == np.inf] = max_value
+        return column
+
+    def clean_infs(self, dataset: np.array):
+        cleared_dataset = []
+        for column in dataset.T:
+            if self._has_inf(column):
+                column = self._clear_infs(*self._get_max_value(column))
+            cleared_dataset.append(column)
+        return np.array(cleared_dataset).T
+
+    @staticmethod
+    def scale_data(dataset: np.array):
+        return MinMaxScaler(feature_range=(0, 1000), copy=False).fit_transform(dataset)
+
+    @property
+    def X(self):
+        return self._X
+
+    @property
+    def y(self):
+        return self._y
+
+
 class Project:
-    def __init__(self, name, versions=None, data=None, bool_features=True):
+    def __init__(self, name, bool_features, versions=None, data=None):
         self.name = name
         self.versions = [] if versions is None else versions
         self.data = [] if data is None else data
@@ -76,7 +117,7 @@ class Project:
         """ Accessing the data from the project and extract the bugged information."""
         y = list(map(lambda _: _['bugged'],
                      filter(lambda _: _['version'] in versions, self.data)))
-        return np.array([v == "True" for v in y], dtype=int) if self.bool_features else np.array(y, dtype=float)
+        return np.array([v == "True" for v in y], dtype=int)
 
     def get_set(self, set_type="train", strategy="standard"):
         """ Get the sets used for machine learning: (X_train/X_test, y_train/y_test)"""
@@ -90,7 +131,8 @@ class Project:
         else:
             raise ValueError("Wrong strategy type")
 
-        return self._get_x(versions), self._get_y(versions)
+        cleaned_set = DatasetCleaner(self._get_x(versions), self._get_y(versions))
+        return cleaned_set.X, cleaned_set.y
 
     def get_X(self, set_type="train", strategy="standard"):
         return self.get_set(set_type, strategy)[0]
@@ -265,7 +307,12 @@ class ModelCache:
             self._cached['memory'] = True
             return classifier
         except KeyError:
-            return load(path)
+            try:
+                return load(path)
+            except Exception:
+                self._cached['memory'] = False
+                self._cached['disk'] = False
+                return self._classifier
 
     def dump(self, classifier, path):
         if not self._cached['disk']:
@@ -430,8 +477,9 @@ class Normalization(CrossProjectApproach, ABC):
 
         X_train, X_test = self.compensate(X_train, X_test)
 
-        X_train = StandardScaler().fit_transform(X_train)
-        X_test = StandardScaler().fit_transform(X_test)
+        if self.encoding:
+            X_train = StandardScaler().fit_transform(X_train)
+            X_test = StandardScaler().fit_transform(X_test)
 
         context = Context(dataset, train_project.name, target_project.name, self.__class__.__name__)
 
@@ -444,13 +492,18 @@ class Normalization(CrossProjectApproach, ABC):
         pass
 
     def encode(self, data_set: List[List]):
-        return PCA().fit_transform(data_set) if self.encoding else data_set
+        if self.encoding:
+            return PCA().fit_transform(data_set)
+        return data_set
 
     @staticmethod
     def compensate_column(A: List[int], B: List[int]):
         AVG_A = np.mean(A)
         AVG_A = 10e-10 if AVG_A == 0 else AVG_A
         AVG_B = np.mean(B)
+        x = [(a * AVG_B) / AVG_A for a in A]
+        if np.isnan(np.sum(x)):
+            pass
         return [(a * AVG_B) / AVG_A for a in A]
 
 
@@ -488,7 +541,7 @@ class KNN(CrossProjectApproach):
 
     class TrainingDatasetSelector:
 
-        def __init__(self, dataset, train_projects: List[Project], distance: Callable, logger, k: int = 10):
+        def __init__(self, dataset, logger, train_projects: List[Project], distance: Callable, k: int = 10):
             self.X = [item for sublist in [train_project.get_X() for train_project in train_projects] for item in
                       sublist]
             self.y = [item for sublist in [train_project.get_y() for train_project in train_projects] for item in
@@ -569,7 +622,8 @@ class KNN(CrossProjectApproach):
         model.logger.debug(
             f'Starting Approach KNN => Target Project {model.target_project.name}')
 
-        self.train_dataset = self.TrainingDatasetSelector(model.dataset, model.train_projects, self.distance, k=self.k)
+        self.train_dataset = self.TrainingDatasetSelector(model.dataset, model.logger, model.train_projects,
+                                                          self.distance, k=self.k)
         X_test, y_test = model.target_project.get_set()
         X_train, y_train = self.train_dataset(X_test)
         train_project_name = f'k={self.k} top instances for each row'
@@ -584,7 +638,7 @@ class KNN(CrossProjectApproach):
             train_project=f'k={self.k} top instances for each row',
             classifier=configuration.classifier.name,
             classifier_configuration=configuration.classifier.configuration,
-            evaluator=configuration.evaluator,
+            evaluator=configuration.evaluator.__name__,
             score=Model(configuration.classifier, configuration.evaluator, context)(dataset))
             for configuration in self.configurations]
 
@@ -621,7 +675,7 @@ class BestOfBreed(CrossProjectApproach):
 
         classifiers = [Classifier(*classifier) for classifier in model.classifiers]
         self.configurations = Configurations(classifiers, model.evaluators)
-        best_breed = self.evaluate_breed(model.train_projects, model.target_project, classifiers)
+        best_breed = self.evaluate_breed(model.dataset, model.train_projects, model.target_project, classifiers)
         model.logger.debug(
             f'Best Of Breed Configuration: Train Project{best_breed.context.train_project}, '
             f'Target Project: {best_breed.context.target_project}'
@@ -696,7 +750,7 @@ class CrossProjectModel:
     def __call__(self):
         def catch(func, *args, **kwargs):
             try:
-                return func(*args, **kwargs)
+                StoreResults(self.dataset)(func(*args, **kwargs))
             except Exception as e:
                 approach = func.__class__.__name__
                 target_project = self.target_project.name
@@ -715,12 +769,10 @@ class CrossProjectModel:
                 ) as en:
                     en(*en.create_error())
 
-                return []
-
         if isinstance(self.approaches, All):
-            return self.approaches(self)
+            catch(self.approaches(self), self)
         else:
-            return [sublist for item in [catch(approach, self) for approach in self.approaches] for sublist in item]
+            list([sublist for item in [catch(approach, self) for approach in self.approaches] for sublist in item])
 
 
 class Classifiers(Enum):
@@ -760,8 +812,10 @@ class DatasetConfiguration(Enum):
              [Standard(), TrainSetNormalization(), TestSetNormalization(), KNN(distance='euclidean'), BestOfBreed()], \
              "smells"
     Metrics = auto(), "metrics_datasets.csv", \
-              [Standard(), TrainSetNormalization(encoding=False), TestSetNormalization(encoding=False), KNN(),
-               BestOfBreed()], \
+              [
+                  Standard(), TrainSetNormalization(encoding=False), TestSetNormalization(encoding=False),
+                  KNN(distance='euclidean'),
+                  BestOfBreed()], \
               "metrics"
 
     @property
@@ -996,6 +1050,7 @@ def timer(func):
 class Configuration:
     def __init__(self, dataset: DatasetConfiguration):
         self.dataset = dataset
+        self.boolean = dataset.output == "smells"
         Logger(dataset.output)
         self.logger = logging.getLogger(dataset.output)
         self.data_path = Path(Path(__file__).parent, "data", dataset.path)
@@ -1014,7 +1069,8 @@ class Configuration:
                 not_features = ['Project', 'Version', 'File', 'Class', 'Bugged']
                 features = {column: row[column] for column in row if column not in not_features}
                 bugged = row['Bugged']
-                self.datasets.setdefault(name, Project(name)).append(version, file, features, bugged)
+                self.datasets.setdefault(name, Project(name, bool_features=self.boolean)).append(version, file,
+                                                                                                 features, bugged)
 
     def __iter__(self):
         self.projects = list(sorted(self.datasets.keys()))
@@ -1043,11 +1099,10 @@ def run_store(config):
     try:
         Logger(config["dataset"])
         config["logger"] = logging.getLogger(config["dataset"])
-        rows = CrossProjectModel(**config)()
+        CrossProjectModel(**config)()
         with EmailNotification(config['dataset'], config['logger'], approach="General",
                                target_project=config['target_project'].name) as en:
             en(*en.create_success())
-        StoreResults(config["dataset"])(rows)
     except Exception as e:
         with EmailNotification(config['dataset'], config['logger'],
                                approach="General",
@@ -1060,7 +1115,8 @@ def run_store(config):
 
 
 if __name__ == '__main__':
-    configurations = list(
-        chain(Configuration(DatasetConfiguration.Smells), Configuration(DatasetConfiguration.Metrics)))
+    # configurations = list(
+    #     chain(Configuration(DatasetConfiguration.Smells), Configuration(DatasetConfiguration.Metrics)))
+    configurations = list(Configuration(DatasetConfiguration.Metrics))
     with Pool() as pool:
         pool.map(run_store, configurations)
