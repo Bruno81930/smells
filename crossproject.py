@@ -1,31 +1,29 @@
 import logging
 import os
-import sys
 import time
 import traceback
 from abc import ABC, abstractmethod
 from collections import namedtuple
 from csv import DictReader
 from datetime import datetime
-from email import encoders
-from email.mime.base import MIMEBase
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from enum import Enum, auto
 from functools import partial, lru_cache
 from itertools import product
-from multiprocessing import Pool
-from numbers import Number
+from multiprocessing import set_start_method, Pool, get_context
+
 from pathlib import Path
 from typing import Tuple, Dict, ClassVar, Union, List, Callable
 
+import discord
 import numpy as np
+from alive_progress import alive_bar
+from dotenv import load_dotenv
 from imblearn.over_sampling import SMOTE
 from joblib import load, dump
 from kneed import KneeLocator
 from pythonjsonlogger import jsonlogger
 from scipy.spatial.distance import cosine, jaccard, rogerstanimoto, euclidean
-from sklearn.cluster import KMeans
+from sklearn.cluster import MiniBatchKMeans
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import f1_score, roc_auc_score, precision_score, recall_score, brier_score_loss, fbeta_score
@@ -148,24 +146,22 @@ class Row:
                  train_project,
                  classifier,
                  classifier_configuration,
-                 evaluator,
-                 score):
+                 scores
+                 ):
         self.target_project = target_project
         self.approach = approach
         self.train_project = train_project
         self.classifier = classifier
         self.classifier_configuration = classifier_configuration
-        self.evaluator = evaluator
-        self.score = score
-        self.elements = [target_project, approach, train_project, classifier,
-                         classifier_configuration, evaluator, score]
+        self.elements = [[target_project, approach, train_project, classifier,
+                          classifier_configuration, item.evaluator, item.score] for item in scores]
 
-    def __iter__(self):
-        for element in self.elements:
-            yield element
+    # def __iter__(self):
+    #     for element in self.elements:
+    #         yield element
 
     def __str__(self):
-        return ','.join(map(str, self.elements))
+        return os.linesep.join([','.join(map(str, elements)) for elements in self.elements])
 
 
 class Classifier:
@@ -247,11 +243,14 @@ class Dataset:
     def store(self):
         dir_path = Path(Path(__file__).parent, "data", "dataset", self.context.dataset,
                         f'{self.context.approach}_{self.context.train_project}_{self.context.target_project}')
-        dir_path.mkdir(exist_ok=True, parents=True)
-        np.savetxt(Path(dir_path, "X_train.csv"), self._training['X'], delimiter=",", fmt="%s")
-        np.savetxt(Path(dir_path, "y_train.csv"), self._training['y'], delimiter=',', fmt="%s")
-        np.savetxt(Path(dir_path, "X_test.csv"), self._testing['X'], delimiter=",", fmt="%s")
-        np.savetxt(Path(dir_path, "y_test.csv"), self._testing['y'], delimiter=',', fmt="%s")
+        try:
+            dir_path.mkdir(exist_ok=False, parents=True)
+            np.savetxt(Path(dir_path, "X_train.csv"), self._training['X'], delimiter=",", fmt="%s")
+            np.savetxt(Path(dir_path, "y_train.csv"), self._training['y'], delimiter=',', fmt="%s")
+            np.savetxt(Path(dir_path, "X_test.csv"), self._testing['X'], delimiter=",", fmt="%s")
+            np.savetxt(Path(dir_path, "y_test.csv"), self._testing['y'], delimiter=',', fmt="%s")
+        except FileExistsError:
+            pass
 
     def __repr__(self):
         return f'Dataset(X_train{list(self._training["X"].shape)}, y_train{list(self._training["y"].shape)}, X_test{list(self._testing["X"].shape)}, y_test{list(self._testing["y"].shape)}, {repr(self.context)})'
@@ -266,66 +265,103 @@ class Singleton(type):
         return cls._instances[cls]
 
 
-class MemoryCache(metaclass=Singleton):
+class MemoryCacheFiller:
+    def __init__(self, projects):
+        self.models = [item for sublist in [classifier.models for classifier in Classifiers] for item in sublist]
+        self.classifiers = [str(Classifier(*model)) for model in self.models]
+        self.dataset = "metrics"
+        self.approaches = [approach.__class__.__name__ for approach in DatasetConfiguration.Metrics.approaches]
+        self.projects = projects
+        self.configurations = product([self.dataset], self.approaches, self.projects, self.classifiers)
+        self.cache = MemoryCache()
+
+    def __call__(self):
+        for configuration in self.configurations:
+            path = ModelPath(*configuration)()
+            try:
+                self.cache[path] = load(path)
+            except:
+                continue
+
+
+class MemoryCache:
+    __shared_state = {}
+
     def __init__(self):
+        self.__dict__ = self.__shared_state
         if not hasattr(self, 'cache'):
             self.cache = dict()
 
     def __getitem__(self, path) -> Classifier:
-        if path in self.cache.keys():
+        assert isinstance(path, str), "Path not type string"
+        try:
             return self.cache[path]
-        raise KeyError("There is no path in store with that classifier.")
+        except:
+            raise KeyError("There is no path in store with that classifier.")
 
     def __setitem__(self, path: str, classifier: Classifier):
         assert isinstance(classifier, Classifier), "Classifier not type classifier"
+        assert isinstance(path, str), "Path not type string"
         self.cache[path] = classifier
 
 
+class ModelPath:
+    def __init__(self, dataset, approach, project, classifier):
+        dir_path = Path(Path(__file__).parent, "data", "cache", dataset, f"{approach}_{project}")
+        dir_path.mkdir(exist_ok=True, parents=True)
+        self.path = str(Path(dir_path, f'{str(classifier)}.joblib').absolute())
+
+    def __call__(self):
+        return self.path
+
+
 class ModelCache:
-    def __init__(self, classifier: Classifier, context: Context):
+    def __init__(self, classifier: Classifier, context: Context, enabled: bool):
         self._classifier = classifier
         self.context = context
-        self._path: Path = self.path()
+        self._path: str = self.path()
         self._cached = {'disk': False, 'memory': False}
+        self._enabled = enabled
 
     @property
     def classifier(self):
         return self._classifier()
 
     def __call__(self):
-        return self._cached['disk']
+        return self._cached['memory'] or self._cached['disk']
 
     def path(self):
-        dir_path = Path(Path(__file__).parent, "data", "cache", self.context.dataset, str(self.context))
-        dir_path.mkdir(exist_ok=True, parents=True)
-        path = Path(dir_path, f'{str(self._classifier)}.joblib')
-        return path
+        return ModelPath(self.context.dataset, self.context.approach, self.context.train_project, self._classifier)()
 
     def load(self, path):
         try:
+            if not self._enabled:
+                return self._fail_cache()
             classifier = MemoryCache()[path]
             self._cached['memory'] = True
             return classifier
         except KeyError:
             try:
-                return load(path)
+                classifier = load(path)
+                self._cached['disk'] = True
+                MemoryCache()[path] = classifier
+                self._cached['memory'] = True
+                return classifier
             except Exception:
-                self._cached['memory'] = False
-                self._cached['disk'] = False
-                return self._classifier
+                return self._fail_cache()
+
+    def _fail_cache(self):
+        self._cached['memory'] = False
+        self._cached['disk'] = False
+        return self._classifier
 
     def dump(self, classifier, path):
         if not self._cached['disk']:
             dump(classifier, path)
             MemoryCache()[path] = classifier
 
-        if self._cached['disk'] and not self._cached['memory']:
-            MemoryCache()[path] = classifier
-
     def __enter__(self):
-        if self._path.exists():
-            self._cached['disk'] = True
-            self._classifier = self.load(self._path)
+        self._classifier = self.load(self._path)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -336,23 +372,25 @@ class ModelCache:
 
 
 class Model:
-    def __init__(self, classifier: Classifier, evaluator: Callable, context: Context):
+    def __init__(self, classifier: Classifier, evaluators: List[Callable], context: Context, use_cache: bool = True):
         self.classifier = classifier
-        self.evaluator = evaluator
+        self.evaluators = evaluators
         self.context = context
         self.oversample = OverSample()
+        self.use_cache = use_cache
 
-    def __call__(self, dataset: Dataset) -> Number:
+    def __call__(self, dataset: Dataset) -> List:
         X_test, y_test = dataset.testing
-        with ModelCache(self.classifier, self.context) as cache:
+        with ModelCache(self.classifier, self.context, self.use_cache) as cache:
             if not cache():
                 X_train, y_train = self.oversample(*dataset.training)
                 cache.classifier.fit(X_train, y_train)
             y_pred = cache.classifier.predict(X_test)
-            return self.evaluator(y_test, y_pred)
+            Scores = namedtuple("Scores", ["evaluator", "score"])
+            return [Scores(evaluator.__name__, evaluator(y_test, y_pred)) for evaluator in self.evaluators]
 
     def __repr__(self):
-        return f'Model({repr(self.classifier)}, {self.evaluator.__name__}, {repr(self.context)})'
+        return f'Model({repr(self.classifier)}, [{",".join([evaluator.__name__ for evaluator in self.evaluators])}], {repr(self.context)})'
 
 
 class Configurations:
@@ -362,17 +400,21 @@ class Configurations:
         self._train_projects = train_projects
 
         self.configurations = (classifiers,
-                               evaluators,
-                               train_projects) if train_projects is not None else (classifiers, evaluators)
+                               [evaluators],
+                               train_projects) if train_projects is not None else (classifiers, [evaluators])
         self._configurations = product(*self.configurations)
 
     def __iter__(self):
         for configuration in self._configurations:
-            element = namedtuple("Configuration", ["classifier", "evaluator", "train_project"])
+            element = namedtuple("Configuration", ["classifier", "evaluators", "train_project"])
             element.classifier = configuration[0]
-            element.evaluator = configuration[1]
+            element.evaluators = configuration[1]
             element.train_project = configuration[2] if self._train_projects is not None else None
             yield element
+
+    def __len__(self):
+        return len(self._classifiers) * len(self._train_projects) \
+            if self._train_projects is not None else len(self._classifiers)
 
 
 class CrossProjectApproach:
@@ -401,34 +443,42 @@ class Standard(CrossProjectApproach):
     def __call__(self, model: 'CrossProjectModel'):
         self.logger = model.logger
         self.logger.debug(
-            f'Starting Approach Standard => Target Project {model.target_project.name}')
+            f'Standard. {model.target_project.name.capitalize()}.')
         classifiers = [Classifier(*classifier) for classifier in model.classifiers]
         self.configurations = Configurations(classifiers, model.evaluators, model.train_projects)
-        return [Row(
-            target_project=model.target_project.name,
-            approach=str(self.__class__.__name__),
-            train_project=configuration.train_project.name,
-            classifier=configuration.classifier.name,
-            classifier_configuration=configuration.classifier.configuration,
-            evaluator=configuration.evaluator.__name__,
-            score=self.evaluate(configuration.classifier, configuration.evaluator,
-                                model.target_project, configuration.train_project, model.dataset))
-            for configuration in self.configurations]
+        rows = list()
+        with alive_bar(len(self.configurations)) as bar:
+            for configuration in self.configurations:
+                dataset = model.dataset
+                approach = str(self.__class__.__name__)
+                target_project = model.target_project
+                train_project = configuration.train_project
+                classifier = configuration.classifier
+                evaluators = configuration.evaluators
+                print(train_project.name)
+                scores = self.evaluate(classifier, evaluators, target_project, train_project, dataset)
+                row = Row(
+                    target_project=target_project.name,
+                    approach=approach,
+                    train_project=configuration.train_project.name,
+                    classifier=classifier.name,
+                    classifier_configuration=classifier.configuration,
+                    scores=scores)
+                bar()
+                rows.append(row)
+        return rows
 
-    def evaluate(self, classifier: Classifier, evaluator, target_project, train_project, dataset):
-        self.logger.debug(
-            f'Evaluating Model on Standard for Training Project: {train_project.name}, Target Project: {target_project.name}, '
-            f'Classifier: {classifier.name} and Evaluator: {evaluator.__name__} '
-        )
+    def evaluate(self, classifier: Classifier, evaluators, target_project, train_project, dataset):
         context = Context(dataset=dataset, train_project=train_project.name, target_project=target_project.name,
                           approach=self.__class__.__name__)
 
-        model = Model(classifier, evaluator, context)
+        model = Model(classifier, evaluators, context)
         X_train, y_train = train_project.get_set(strategy="all")
         X_test, y_test = target_project.get_set(strategy="all")
         dataset = Dataset(X_train=X_train, y_train=y_train, X_test=X_test, y_test=y_test, context=context)
 
-        return model(dataset)
+        scores = model(dataset)
+        return scores
 
 
 class Normalization(CrossProjectApproach, ABC):
@@ -445,30 +495,35 @@ class Normalization(CrossProjectApproach, ABC):
 
     def __call__(self, model: 'CrossProjectModel'):
         self.logger = model.logger
-        self.logger.debug(
-            f'Starting Approach Normalization => Target Project {model.target_project.name}')
-
         classifiers = [Classifier(*classifier) for classifier in model.classifiers]
-        self.configurations = Configurations(classifiers, model.evaluators, model.train_projects)
+        self.logger.debug(
+            f'{self.__class__.__name__}. {model.target_project.name.capitalize()}. {classifiers[0].name}.')
 
-        return [Row(
-            target_project=model.target_project.name,
-            approach=str(self.__class__.__name__),
-            train_project=configuration.train_project.name,
-            classifier=configuration.classifier.name,
-            classifier_configuration=configuration.classifier.configuration,
-            evaluator=configuration.evaluator.__name__,
-            score=self.normalization(configuration.train_project, model.target_project,
-                                     configuration.classifier,
-                                     configuration.evaluator, model.dataset))
-            for configuration in self.configurations]
+        self.configurations = Configurations(classifiers, model.evaluators, model.train_projects)
+        rows = list()
+        with alive_bar(len(self.configurations)) as bar:
+            for configuration in self.configurations:
+                dataset = model.dataset
+                approach = str(self.__class__.__name__)
+                classifier = configuration.classifier
+                evaluators = configuration.evaluators
+                target_project = model.target_project
+                train_project = configuration.train_project
+                scores = self.normalization(train_project, target_project, classifier, evaluators, dataset)
+                row = Row(
+                    target_project=target_project.name,
+                    approach=approach,
+                    train_project=train_project.name,
+                    classifier=classifier.name,
+                    classifier_configuration=classifier.configuration,
+                    scores=scores
+                )
+                bar()
+                rows.append(row)
+        return rows
 
     def normalization(self, train_project: Project, target_project: Project, classifier: Classifier,
-                      evaluator: Callable, dataset: str):
-        self.logger.debug(
-            f'Applying Normalization for Training Project: {train_project.name}, Target Project: {target_project.name}, '
-            f'Classifier: {classifier.name} and Evaluator: {evaluator.__name__} '
-        )
+                      evaluators: List[Callable], dataset: str):
         X_train, y_train = train_project.get_set(strategy="all")
         X_test, y_test = target_project.get_set(strategy="all")
 
@@ -484,8 +539,9 @@ class Normalization(CrossProjectApproach, ABC):
         context = Context(dataset, train_project.name, target_project.name, self.__class__.__name__)
 
         dataset = Dataset(X_train, y_train, X_test, y_test, context)
-        model = Model(classifier, evaluator, context)
-        return model(dataset)
+        model = Model(classifier, evaluators, context)
+        scores = model(dataset)
+        return scores
 
     @abstractmethod
     def compensate(self, X_train, Y_test):
@@ -572,8 +628,8 @@ class KNN(CrossProjectApproach):
             self._selected_y.append(y)
 
         class Cluster:
-
-            def __init__(self, X, n_clusters_range=(1, 11)):
+            # number of clusters for smells 11
+            def __init__(self, X, n_clusters_range=(1, 51)):
                 self.X = X
                 self.n_clusters_range = n_clusters_range
                 self.kmeans = self._calculate_k_means()
@@ -581,7 +637,8 @@ class KNN(CrossProjectApproach):
 
             def _calculate_k_means(self):
                 kmeans_range = {n_clusters:
-                                    KMeans(n_clusters=n_clusters, init='k-means++', random_state=0).fit(self.X)
+                                # Used Normal KMeans for Smells computation. MiniBatch was bc memory problems
+                                    MiniBatchKMeans(n_clusters=n_clusters, init='k-means++', random_state=0).fit(self.X)
                                 for n_clusters in range(*self.n_clusters_range)}
                 wws = [kmean.inertia_ for kmean in kmeans_range.values()]
                 clusters = [n_clusters for n_clusters in kmeans_range.keys()]
@@ -611,7 +668,11 @@ class KNN(CrossProjectApproach):
 
         def __call__(self, from_testing_rows):
             self.logger.debug("KNN Selecting from testing rows")
-            [self.select_top_k(test_row) for test_row in from_testing_rows]
+            with alive_bar(len(from_testing_rows)) as bar:
+                for test_row in from_testing_rows:
+                    self.select_top_k(test_row)
+                    bar()
+
             return np.array(self._selected_X), np.array(self._selected_y)
 
         @lru_cache(maxsize=None)
@@ -620,7 +681,7 @@ class KNN(CrossProjectApproach):
 
     def __call__(self, model: 'CrossProjectModel'):
         model.logger.debug(
-            f'Starting Approach KNN => Target Project {model.target_project.name}')
+            f'KNN. {model.target_project.name.capitalize()}.')
 
         self.train_dataset = self.TrainingDatasetSelector(model.dataset, model.logger, model.train_projects,
                                                           self.distance, k=self.k)
@@ -632,15 +693,29 @@ class KNN(CrossProjectApproach):
         classifiers = [Classifier(*classifier) for classifier in model.classifiers]
         self.configurations = Configurations(classifiers, model.evaluators)
 
-        return [Row(
-            target_project=model.target_project.name,
-            approach=str(self.__class__.__name__),
-            train_project=f'k={self.k} top instances for each row',
-            classifier=configuration.classifier.name,
-            classifier_configuration=configuration.classifier.configuration,
-            evaluator=configuration.evaluator.__name__,
-            score=Model(configuration.classifier, configuration.evaluator, context)(dataset))
-            for configuration in self.configurations]
+        rows = list()
+
+        with alive_bar(len(self.configurations)) as bar:
+            for configuration in self.configurations:
+                approach = str(self.__class__.__name__)
+                classifier = configuration.classifier
+                evaluators = configuration.evaluators
+                train_project = f'k={self.k} top instances for each row'
+                target_project = model.target_project
+                scores = Model(classifier, evaluators, context, use_cache=False)(dataset)
+
+                row = Row(
+                    target_project=target_project.name,
+                    approach=approach,
+                    train_project=train_project,
+                    classifier=classifier.name,
+                    classifier_configuration=classifier.configuration,
+                    scores=scores
+                )
+                bar()
+                rows.append(row)
+
+        return rows
 
 
 class Clustering(CrossProjectApproach):
@@ -668,28 +743,41 @@ class BestOfBreed(CrossProjectApproach):
 
     def __init__(self, breed_evaluator: Callable = partial(fbeta_score, beta=2)):
         self.breed_evaluator = breed_evaluator
+        self.breed_evaluator.__name__ = "f2-score"
 
     def __call__(self, model: 'CrossProjectModel'):
         model.logger.debug(
-            f'Starting Approach BestOfBreed => Target Project {model.target_project.name}')
+            f'BestOfBreed. {model.target_project.name.capitalize()}. ')
 
+        dataset = model.dataset
+        approach = str(self.__class__.__name__)
+        train_projects = model.train_projects
+        target_project = model.target_project
         classifiers = [Classifier(*classifier) for classifier in model.classifiers]
         self.configurations = Configurations(classifiers, model.evaluators)
-        best_breed = self.evaluate_breed(model.dataset, model.train_projects, model.target_project, classifiers)
-        model.logger.debug(
-            f'Best Of Breed Configuration: Train Project{best_breed.context.train_project}, '
-            f'Target Project: {best_breed.context.target_project}'
-        )
 
-        return [Row(
-            target_project=model.target_project.name,
-            approach=str(self.__class__.__name__),
-            train_project=best_breed.context.train_project,
-            classifier=configuration.classifier.name,
-            classifier_configuration=configuration.classifier.configuration,
-            evaluator=configuration.evaluator.__name__,
-            score=Model(configuration.classifier, configuration.evaluator, best_breed.context)(best_breed))
-            for configuration in self.configurations]
+        best_breed = self.evaluate_breed(dataset, train_projects, target_project, classifiers)
+
+        rows = list()
+        with alive_bar(len(self.configurations)) as bar:
+            for configuration in self.configurations:
+                train_project = configuration.train_project
+                classifier = configuration.classifier
+                evaluators = configuration.evaluators
+                context = best_breed.context
+                scores = Model(classifier, evaluators, context)(best_breed)
+                row = Row(
+                    target_project=target_project.name,
+                    approach=approach,
+                    train_project=train_project,
+                    classifier=classifier.name,
+                    classifier_configuration=classifier.configuration,
+                    scores=scores
+                )
+                bar()
+                rows.append(row)
+
+        return rows
 
     def evaluate_breed(self, dataset: str, train_projects: List[Project], target_project: Project,
                        classifiers: List[Classifier]) -> Dataset:
@@ -700,11 +788,11 @@ class BestOfBreed(CrossProjectApproach):
                             y_test,
                             Context(dataset, train_project, target_project.name, self.__class__.__name__))
                     for train_project in train_sets.keys()]
-        models = {dataset: [Model(classifier, self.breed_evaluator, dataset.context)
+        models = {dataset: [Model(classifier, [self.breed_evaluator], dataset.context)
                             for classifier in classifiers]
                   for dataset in datasets}
 
-        scores = {dataset: np.mean(list(map(lambda model: model(dataset), models[dataset])))
+        scores = {dataset: np.mean(list(map(lambda model: model(dataset)[0].score, models[dataset])))
                   for dataset in models.keys()}
 
         return max(scores, key=scores.get)
@@ -749,30 +837,41 @@ class CrossProjectModel:
 
     def __call__(self):
         def catch(func, *args, **kwargs):
+            approach = func.__class__.__name__
+            target_project = self.target_project.name
             try:
-                StoreResults(self.dataset)(func(*args, **kwargs))
+                Discord()(f"""
+                Cross-Project Iteration: Started
+                Dataset is {self.dataset}.
+                Target Project is {target_project}.
+                Approach is {approach}
+                """)
+                data = func(*args, **kwargs)
+                Discord()(f"""
+                Cross-Project Iteration: Finished
+                Dataset is {self.dataset}.
+                Target Project is {target_project}.
+                Approach is {approach}
+                """)
+                StoreResults(self.dataset)(data)
+
             except Exception as e:
-                approach = func.__class__.__name__
-                target_project = self.target_project.name
+                Discord()(f"""
+                Cross-Project Iteration: Exception
+                Dataset is {self.dataset}.
+                Target Project is {target_project}.
+                Approach is {approach}
+                Exception is {e}
+                {traceback.print_tb(e.__traceback__)}
+                """)
                 self.logger.error(
                     f'Exception. Target Project={target_project}. Approach={approach}'
                 )
-                with EmailNotification(
-                        self.dataset,
-                        self.logger,
-                        approach=approach,
-                        target_project=target_project,
-                        exception_msg=e,
-                        exception_type=sys.exc_info()[0],
-                        exception_value=sys.exc_info()[1],
-                        exception_tb=sys.exc_info()[2]
-                ) as en:
-                    en(*en.create_error())
 
         if isinstance(self.approaches, All):
             catch(self.approaches(self), self)
         else:
-            list([sublist for item in [catch(approach, self) for approach in self.approaches] for sublist in item])
+            [catch(approach, self) for approach in self.approaches]
 
 
 class Classifiers(Enum):
@@ -808,15 +907,15 @@ class Evaluators(Enum):
 
 
 class DatasetConfiguration(Enum):
-    Smells = auto(), "datasets.csv", \
-             [Standard(), TrainSetNormalization(), TestSetNormalization(), KNN(distance='euclidean'), BestOfBreed()], \
-             "smells"
-    Metrics = auto(), "metrics_datasets.csv", \
-              [
-                  Standard(), TrainSetNormalization(encoding=False), TestSetNormalization(encoding=False),
-                  KNN(distance='euclidean'),
-                  BestOfBreed()], \
-              "metrics"
+    Smells = auto(), "datasets.csv", [KNN(distance='euclidean')], "smells"
+    # [Standard(), TrainSetNormalization(), TestSetNormalization(),
+    #                                   KNN(distance='euclidean'), BestOfBreed()], "smells"
+    Metrics = auto(), "metrics_datasets.csv", [KNN(distance='euclidean')], "metrics"
+
+    # [Standard(), TrainSetNormalization(encoding=False),
+    #                                                TestSetNormalization(encoding=False)], "metrics"
+    # KNN(distance='euclidean'),
+    # BestOfBreed()], \
 
     @property
     def path(self) -> str:
@@ -832,24 +931,29 @@ class DatasetConfiguration(Enum):
 
 
 class Logger:
-    def __init__(self, dataset: str, level=logging.DEBUG):
+    def __init__(self, dataset: str, target_project: str, level=logging.DEBUG):
+        self.dataset = dataset
+        self.target_project = target_project
         self.dir_path = Path(Path(__file__).parent, "data", "logs", dataset)
         self.dir_path.mkdir(parents=True, exist_ok=True)
         self.time_name = str(datetime.now()).replace(" ", "_")
-        logger = logging.getLogger(dataset)
-        logger.setLevel(level)
-        logger.addHandler(self._json_file_handler())
-        logger.addHandler(self._csv_file_handler())
-        logger.addHandler(self._log_handler())
+        self.logger = logging.getLogger(dataset)
+        self.logger.setLevel(level)
+        self.logger.addHandler(self._json_file_handler())
+        self.logger.addHandler(self._csv_file_handler())
+        self.logger.addHandler(self._log_handler())
+
+    def __call__(self, *args, **kwargs):
+        return self.logger
 
     def _json_file_handler(self):
-        json_file_handler = logging.FileHandler(Path(self.dir_path, f'{self.time_name}.json'))
+        json_file_handler = logging.FileHandler(Path(self.dir_path, f'{self.target_project}_{self.dataset}.json'))
         json_formatter = Logger.CustomJsonFormatter('%(timestamp)s %(processName)s %(level)s %(name)s %(message)s')
         json_file_handler.setFormatter(json_formatter)
         return json_file_handler
 
     def _csv_file_handler(self):
-        csv_file_handler = logging.FileHandler(Path(self.dir_path, f'{self.time_name}.csv'))
+        csv_file_handler = logging.FileHandler(Path(self.dir_path, f'{self.target_project}_{self.dataset}.csv'))
         csv_formatter = logging.Formatter('%(asctime)s,%(processName)s,%(name)s,%(message)s')
         csv_file_handler.setFormatter(csv_formatter)
         return csv_file_handler
@@ -873,153 +977,6 @@ class Logger:
                 log_record['level'] = record.levelname
 
 
-try:
-    from notifications import EmailNotificationBase
-
-
-    class EmailNotification(EmailNotificationBase):
-        def __init__(self, dataset, logger, approach=None, target_project=None, exception_msg=None, exception_type=None,
-                     exception_value=None,
-                     exception_tb=None, log_tail=50):
-            super().__init__()
-            self.dataset = dataset
-            self.logger = logger
-            self.approach = approach
-            self.target_project = target_project
-            self.exception_msg = exception_msg
-            self.exception_type = exception_type
-            self.exception_value = exception_value
-            self.exception_tb = exception_tb
-            self.log_tail = log_tail
-            self.message_time = str(datetime.now())
-
-        def create_error(self):
-            nt = self.NotificationType.ERROR
-            subject = f"[{self.message_time}] {nt.type}: Dataset={self.dataset}  Approach={self.approach}  Target={self.target_project}"
-            content = f"[{nt.type}]\n" + self._create_meta(nt) + self._create_exception(nt) + self._create_logs()
-            return subject, content
-
-        def create_critical(self):
-            nt = self.NotificationType.CRITICAL
-            subject = f"[{self.message_time}] {nt.type}: Dataset={self.dataset}"
-            content = f"[{nt.type}]\n" + self._create_meta(nt) + self._create_exception(nt) + self._create_logs()
-            return subject, content
-
-        def create_success(self):
-            nt = self.NotificationType.SUCCESS
-            subject = f"[{self.message_time}] {nt.type}: Dataset={self.dataset} Target={self.target_project}"
-            content = f"[{nt.type}]\n" + self._create_meta(nt)
-            return subject, content
-
-        class NotificationType(Enum):
-
-            ERROR = auto(), "ERROR"
-            CRITICAL = auto(), "CRITICAL"
-            SUCCESS = auto(), "SUCCESS"
-
-            @property
-            def type(self):
-                return self.value[1]
-
-        def _create_meta(self, notification_type: NotificationType):
-            content = f"""
-            Time: {self.message_time}
-            Dataset: {self.dataset}
-            """
-            if notification_type == self.NotificationType.CRITICAL:
-                content += "---\n\n"
-                return content
-
-            content += f"""
-            Approach: {self.approach}
-            Target Project: {self.target_project}\n
-            ---\n
-            """
-
-            return content
-
-        def _create_exception(self, notification_type: NotificationType):
-            if notification_type != self.NotificationType.ERROR and notification_type != self.NotificationType.CRITICAL:
-                return
-
-            frames = traceback.extract_tb(self.exception_tb)
-            frames = "\n".join([self._print_frame(frame[0] + 1, frame[1]) for frame in enumerate(frames)])
-
-            return f"""
-            Exception:
-                Exception Name: {self.exception_type.__name__}
-                Exception Values: {str(self.exception_value)}
-                Exception Message: {self.exception_msg}\n
-                Exception Frames {frames} 
-            ---\n
-            """
-
-        def _create_logs(self):
-            log_lines = []
-            try:
-                log_path = self.logger.handlers[0].baseFilename
-                with open(log_path, 'r') as log:
-                    log_lines.extend(log.readlines()[-self.log_tail:])
-            except:
-                pass
-            log_lines = '\n\t\t'.join(log_lines)
-            return f"""
-            Logs:
-                {log_lines}
-            """
-
-        @staticmethod
-        def _print_frame(number, frame: traceback.FrameSummary):
-            return f"""
-                    [Frame #{number}]
-                    Name: {frame.name}
-                    FileName: {frame.filename}
-                    Line: {frame.line}
-                    Line Number: {str(frame.lineno)}
-                    ----------- 
-                    
-               """
-
-        def __call__(self, subject, content):
-            self.payload = None
-            self._create_payload()
-
-            self.message = MIMEMultipart()
-            self._write_message(subject, content)
-
-            text = self.message.as_string()
-            self.server.sendmail(self.email, self.email, text)
-
-        def _create_payload(self):
-            try:
-                attach_file_path = self.logger.handlers[0].baseFilename
-                attach_file_name = Path(attach_file_path).name
-                attach_file = open(attach_file_path, 'rb')
-                self.payload = MIMEBase('application', 'octate-stream')
-                self.payload.set_payload(attach_file.read())
-                encoders.encode_base64(self.payload)
-                self.payload.add_header('Content-Disposition', 'attachment', filename=attach_file_name)
-            except:
-                self.payload = None
-
-        def _write_message(self, subject, content):
-            self.message['From'] = self.email
-            self.message['To'] = self.email
-            self.message['Subject'] = subject
-            self.message.attach(MIMEText(content, 'plain'))
-            if self.payload is not None:
-                self.message.attach(self.payload)
-
-
-except ImportError:
-    class EmailNotification:
-        def create_error(self, *args, **kwargs):
-            pass
-
-        def __call__(self, *args, **kwargs):
-            pass
-
-
 class StoreResults:
     def __init__(self, dataset, out_path=Path(Path(__file__).parent, "out")):
         self.out_path = out_path
@@ -1034,6 +991,12 @@ class StoreResults:
     def __call__(self, rows: List[Row]):
         with open(self.path, 'a') as results_file:
             [results_file.write(str(row) + os.linesep) for row in rows]
+        Discord()(f"""
+                        Cross-Project Iteration: Stored
+                        Data length is {len(rows)}
+                        Data head is {rows[0]}
+                        Path is {self.path}.
+                        """)
 
 
 def timer(func):
@@ -1051,33 +1014,44 @@ class Configuration:
     def __init__(self, dataset: DatasetConfiguration):
         self.dataset = dataset
         self.boolean = dataset.output == "smells"
-        Logger(dataset.output)
-        self.logger = logging.getLogger(dataset.output)
+        self.logger = Logger(dataset.output, "configuration")()
         self.data_path = Path(Path(__file__).parent, "data", dataset.path)
         self.datasets = dict()
         self.get_datasets()
         self.store_results = StoreResults(self.dataset.output)
+        # self.ignore = ['activemq-artemis', 'airavata', 'archiva', 'asterixdb', 'atlas', 'beam', 'bookkeeper',
+        #                'carbondata', 'commons-beanutils', 'commons-collections', 'commons-dbcp', 'commons-email',
+        #                'commons-jexl', 'commons-math', 'continuum', 'curator', 'deltaspike', 'directory-kerby',
+        #                'directory-server', 'directory-studio', 'giraph', 'helix', 'jackrabbit', 'jackrabbit-oak',
+        #                'knox', 'kylin', 'lucene-solr', 'maven', 'myfaces', 'nifi', 'openmeetings', 'openwebbeans',
+        #                'phoenix', 'pulsar', 'ranger', 'reef', 'roller', 'storm', 'struts', 'syncope', 'systemml',
+        #                'tapestry-5', 'tinkerpop', 'wicket', 'xmlgraphics-fop', 'zeppelin']
+        self.ignore = []
 
     def get_datasets(self):
-        self.logger.debug("Obtaining datasets.")
+        self.logger.debug("Obtaining Datasets.")
+        num_lines = sum(1 for line in open(self.data_path))
         with open(self.data_path, 'r') as read_obj:
             csv_reader = DictReader(read_obj)
-            for row in csv_reader:
-                name = row['Project']
-                version = row['Version']
-                file = (row['File'], row['Class'])
-                not_features = ['Project', 'Version', 'File', 'Class', 'Bugged']
-                features = {column: row[column] for column in row if column not in not_features}
-                bugged = row['Bugged']
-                self.datasets.setdefault(name, Project(name, bool_features=self.boolean)).append(version, file,
-                                                                                                 features, bugged)
+            with alive_bar(num_lines - 1) as bar:
+                for row in csv_reader:
+                    name = row['Project']
+                    version = row['Version']
+                    file = (row['File'], row['Class'])
+                    not_features = ['Project', 'Version', 'File', 'Class', 'Bugged']
+                    features = {column: row[column] for column in row if column not in not_features}
+                    bugged = row['Bugged']
+                    self.datasets.setdefault(name, Project(name, bool_features=self.boolean)).append(version, file,
+                                                                                                     features, bugged)
+                    bar()
 
     def __iter__(self):
         self.projects = list(sorted(self.datasets.keys()))
         self.target_projects = self.projects[:]
+        self.target_projects = list(filter(lambda project: project not in self.ignore, self.target_projects))
+        # MemoryCacheFiller(self.target_projects)()
         self.evaluators = list(map(lambda x: x.evaluator, Evaluators))
         self.classifiers = [item for sublist in [classifier.models for classifier in Classifiers] for item in sublist]
-        self.logger.debug(f'Beginning Configuration Iterator.')
         return self
 
     def __next__(self):
@@ -1096,27 +1070,37 @@ class Configuration:
 
 
 def run_store(config):
+    dataset = config["dataset"]
+    target_project = config["target_project"].name
     try:
-        Logger(config["dataset"])
-        config["logger"] = logging.getLogger(config["dataset"])
+        config["logger"] = Logger(dataset, target_project)()
         CrossProjectModel(**config)()
-        with EmailNotification(config['dataset'], config['logger'], approach="General",
-                               target_project=config['target_project'].name) as en:
-            en(*en.create_success())
+        Discord()(f"""Cross-Project Iteration: Finished
+        Dataset is {dataset}.
+        Target Project is {target_project}.""")
     except Exception as e:
-        with EmailNotification(config['dataset'], config['logger'],
-                               approach="General",
-                               target_project=config['target_project'].name,
-                               exception_msg=e,
-                               exception_type=sys.exc_info()[0],
-                               exception_value=sys.exc_info()[1],
-                               exception_tb=sys.exc_info()[2]) as en:
-            en(*en.create_critical())
+        Discord()(f"""Cross-Project Iteration: Critically Failed Iteration
+        Dataset is {dataset}.
+        Target Project is {target_project}.
+        Exception is {e}
+        {traceback.print_tb(e.__traceback__)}
+        """)
+
+
+class Discord:
+    def __init__(self):
+        load_dotenv()
+        webhook_id = os.getenv('DISCORD_WEBHOOK')
+        self.webhook = discord.Webhook.from_url(webhook_id, adapter=discord.RequestsWebhookAdapter())
+
+    def __call__(self, message):
+        self.webhook.send(message)
 
 
 if __name__ == '__main__':
     # configurations = list(
     #     chain(Configuration(DatasetConfiguration.Smells), Configuration(DatasetConfiguration.Metrics)))
     configurations = list(Configuration(DatasetConfiguration.Metrics))
-    with Pool() as pool:
+    with Pool(processes=99) as pool:
         pool.map(run_store, configurations)
+    # list(map(run_store, configurations))
