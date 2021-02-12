@@ -1,19 +1,20 @@
 import logging
 import os
 import time
-import traceback
+from traceback import print_tb
 from abc import ABC, abstractmethod
 from collections import namedtuple
 from csv import DictReader
 from datetime import datetime
 from enum import Enum, auto
-from functools import partial, lru_cache
+from functools import partial, lru_cache, reduce
 from itertools import product
 from multiprocessing import set_start_method, Pool, get_context
 
 from pathlib import Path
 from typing import Tuple, Dict, ClassVar, Union, List, Callable
 
+import click
 import discord
 import numpy as np
 from alive_progress import alive_bar
@@ -32,6 +33,7 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
+from toolz import apply
 
 
 class DatasetCleaner:
@@ -266,22 +268,24 @@ class Singleton(type):
 
 
 class MemoryCacheFiller:
-    def __init__(self, projects):
-        self.models = [item for sublist in [classifier.models for classifier in Classifiers] for item in sublist]
-        self.classifiers = [str(Classifier(*model)) for model in self.models]
-        self.dataset = "metrics"
-        self.approaches = [approach.__class__.__name__ for approach in DatasetConfiguration.Metrics.approaches]
-        self.projects = projects
+    def __init__(self, configurator):
+        self.classifiers = [str(Classifier(*model)) for model in configurator.classifiers]
+        self.dataset = configurator.output
+        self.approaches = [approach.__class__.__name__ for approach in configurator.approaches]
+        self.projects = configurator.projects
         self.configurations = product([self.dataset], self.approaches, self.projects, self.classifiers)
+        self.size = len(self.approaches) * len(self.projects) * len(self.classifiers)
         self.cache = MemoryCache()
 
     def __call__(self):
-        for configuration in self.configurations:
-            path = ModelPath(*configuration)()
-            try:
-                self.cache[path] = load(path)
-            except:
-                continue
+        with alive_bar(self.size) as bar:
+            for configuration in self.configurations:
+                path = ModelPath(*configuration)()
+                try:
+                    bar()
+                    self.cache[path] = load(path)
+                except:
+                    continue
 
 
 class MemoryCache:
@@ -862,7 +866,7 @@ class CrossProjectModel:
                 Target Project is {target_project}.
                 Approach is {approach}
                 Exception is {e}
-                {traceback.print_tb(e.__traceback__)}
+                {print_tb(e.__traceback__)}
                 """)
                 self.logger.error(
                     f'Exception. Target Project={target_project}. Approach={approach}'
@@ -906,10 +910,9 @@ class Evaluators(Enum):
         return self.value[1]
 
 
-class DatasetConfiguration(Enum):
-    Smells = auto(), "datasets.csv", [KNN(distance='euclidean')], "smells"
-    # [Standard(), TrainSetNormalization(), TestSetNormalization(),
-    #                                   KNN(distance='euclidean'), BestOfBreed()], "smells"
+class DatasetConfiguration2(Enum):
+    Smells = auto(), "datasets.csv", [Standard(), TrainSetNormalization(), TestSetNormalization(),
+                                      KNN(distance='euclidean'), BestOfBreed()], "smells"
     Metrics = auto(), "metrics_datasets.csv", [KNN(distance='euclidean')], "metrics"
 
     # [Standard(), TrainSetNormalization(encoding=False),
@@ -1011,24 +1014,16 @@ def timer(func):
 
 
 class Configuration:
-    def __init__(self, dataset: DatasetConfiguration):
-        self.dataset = dataset
-        self.boolean = dataset.output == "smells"
-        self.logger = Logger(dataset.output, "configuration")()
-        self.data_path = Path(Path(__file__).parent, "data", dataset.path)
+    def __init__(self, configurator: "Configurator"):
+        self.configurator = configurator
+        self.boolean = configurator.output == "smells"
+        self.logger = Logger(configurator.output, "configuration")()
+        self.data_path = Path(Path(__file__).parent, "data", configurator.path)
         self.datasets = dict()
-        self.get_datasets()
-        self.store_results = StoreResults(self.dataset.output)
-        # self.ignore = ['activemq-artemis', 'airavata', 'archiva', 'asterixdb', 'atlas', 'beam', 'bookkeeper',
-        #                'carbondata', 'commons-beanutils', 'commons-collections', 'commons-dbcp', 'commons-email',
-        #                'commons-jexl', 'commons-math', 'continuum', 'curator', 'deltaspike', 'directory-kerby',
-        #                'directory-server', 'directory-studio', 'giraph', 'helix', 'jackrabbit', 'jackrabbit-oak',
-        #                'knox', 'kylin', 'lucene-solr', 'maven', 'myfaces', 'nifi', 'openmeetings', 'openwebbeans',
-        #                'phoenix', 'pulsar', 'ranger', 'reef', 'roller', 'storm', 'struts', 'syncope', 'systemml',
-        #                'tapestry-5', 'tinkerpop', 'wicket', 'xmlgraphics-fop', 'zeppelin']
-        self.ignore = []
+        self._get_datasets()
+        self.store_results = StoreResults(self.configurator.output)
 
-    def get_datasets(self):
+    def _get_datasets(self):
         self.logger.debug("Obtaining Datasets.")
         num_lines = sum(1 for line in open(self.data_path))
         with open(self.data_path, 'r') as read_obj:
@@ -1048,10 +1043,11 @@ class Configuration:
     def __iter__(self):
         self.projects = list(sorted(self.datasets.keys()))
         self.target_projects = self.projects[:]
-        self.target_projects = list(filter(lambda project: project not in self.ignore, self.target_projects))
-        # MemoryCacheFiller(self.target_projects)()
+        self.target_projects = list(filter(lambda project: project in self.configurator.projects, self.target_projects))
+        if self.configurator.with_cache():
+            self.logger.debug("Obtaining Classifiers from Cache.")
+            MemoryCacheFiller(self.configurator)()
         self.evaluators = list(map(lambda x: x.evaluator, Evaluators))
-        self.classifiers = [item for sublist in [classifier.models for classifier in Classifiers] for item in sublist]
         return self
 
     def __next__(self):
@@ -1060,31 +1056,14 @@ class Configuration:
             projects = list(filter(lambda project: project != target_project_name, self.projects))
             train_projects = list(map(lambda name: self.datasets[name], projects))
             target_project = self.datasets[target_project_name]
-            configuration = {"dataset": self.dataset.output, "train_projects": train_projects,
+            configuration = {"dataset": self.configurator.output, "train_projects": train_projects,
                              "target_project": target_project,
-                             "classifiers": self.classifiers, "evaluators": self.evaluators, "logger": self.logger,
-                             "approaches": self.dataset.approaches}
+                             "classifiers": self.configurator.classifiers, "evaluators": self.evaluators,
+                             "logger": self.logger,
+                             "approaches": self.configurator.approaches}
             return configuration
         except IndexError:
             raise StopIteration
-
-
-def run_store(config):
-    dataset = config["dataset"]
-    target_project = config["target_project"].name
-    try:
-        config["logger"] = Logger(dataset, target_project)()
-        CrossProjectModel(**config)()
-        Discord()(f"""Cross-Project Iteration: Finished
-        Dataset is {dataset}.
-        Target Project is {target_project}.""")
-    except Exception as e:
-        Discord()(f"""Cross-Project Iteration: Critically Failed Iteration
-        Dataset is {dataset}.
-        Target Project is {target_project}.
-        Exception is {e}
-        {traceback.print_tb(e.__traceback__)}
-        """)
 
 
 class Discord:
@@ -1097,10 +1076,125 @@ class Discord:
         self.webhook.send(message)
 
 
+class ValueErrorMessage:
+    dataset = "--dataset/-d argument value is incorrect."
+    approach = "--approach/-a argument values are incorrect."
+    classifier = "--classifier/-c argument values are incorrect."
+    project = "--target/-t argument values are incorrect."
+
+
+class Configurator:
+    def __init__(self, dataset, approaches, classifier, projects, nocache):
+        self._path = self.get_path(dataset)
+        self._output = dataset
+        self._approaches = self.get_approaches(approaches)
+        self._classifiers = self.get_classifiers(classifier)
+        self._projects = self.get_projects(projects)
+        self._cache = True if not nocache else False
+
+    @staticmethod
+    def get_path(dataset):
+        _ = {"smells": "datasets.csv", "metrics": "metrics_datasets.csv"}
+        assert dataset in _.keys(), ValueErrorMessage.dataset
+        return _[dataset]
+
+    @staticmethod
+    def get_approaches(approaches):
+        _ = {"std": Standard(), "train": TrainSetNormalization(encoding=False),
+             "test": TestSetNormalization(encoding=False), "knn": KNN(), "best": BestOfBreed()}
+        assert all([approach in _.keys() for approach in approaches]), ValueErrorMessage.approach
+        return [_[approach] for approach in approaches]
+
+    @staticmethod
+    def get_classifiers(classifiers):
+        _ = {"rf": (RandomForestClassifier, [{}]), "svc": (SVC, [{}]), "mp": (MLPClassifier, [{}]),
+             "dt": (DecisionTreeClassifier, [{}]), "nb": (GaussianNB, [{}])}
+        assert all([classifier in _.keys() for classifier in classifiers]), ValueErrorMessage.classifier
+        classifiers = [_[classifier] for classifier in classifiers]
+        classifiers = [list(zip([item[0]] * len(item[1]), list(item[1]))) for item in classifiers]
+        return [item for sublist in classifiers for item in sublist]
+
+    @staticmethod
+    def get_projects(projects):
+        if projects == ("all",):
+            return Projects.projects
+        else:
+            assert all([project in Projects.projects for project in projects]), ValueErrorMessage.project
+            return projects
+
+    @property
+    def path(self) -> str:
+        return self._path
+
+    @property
+    def approaches(self) -> List:
+        return self._approaches
+
+    @property
+    def output(self):
+        return self._output
+
+    @property
+    def classifiers(self):
+        return self._classifiers
+
+    @property
+    def projects(self):
+        return self._projects
+
+    def with_cache(self):
+        return self._cache
+
+
+class Projects:
+    projects = ['accumulo', 'activemq', 'activemq-artemis', 'airavata', 'archiva', 'asterixdb', 'atlas', 'avro',
+                'beam', 'bookkeeper', 'calcite', 'camel', 'carbondata', 'cassandra', 'cayenne', 'clerezza', 'cocoon',
+                'commons-beanutils', 'commons-cli', 'commons-codec', 'commons-collections', 'commons-compress',
+                'commons-csv', 'commons-dbcp', 'commons-email', 'commons-io', 'commons-jexl', 'commons-lang',
+                'commons-math', 'commons-net', 'commons-validator', 'commons-vfs', 'continuum', 'crunch', 'curator',
+                'cxf', 'deltaspike', 'directory-kerby', 'directory-server', 'directory-studio', 'drill', 'flink',
+                'giraph', 'hadoop', 'hbase', 'helix', 'hive', 'isis', 'jackrabbit', 'jackrabbit-oak', 'jclouds',
+                'jena', 'johnzon', 'juneau', 'kafka', 'karaf', 'knox', 'kylin', 'lucene-solr', 'manifoldcf', 'maven',
+                'maven-surefire', 'metron', 'myfaces', 'myfaces-tobago', 'nifi', 'nutch', 'ofbiz', 'olingo-odata4',
+                'openjpa', 'openmeetings', 'opennlp', 'openwebbeans', 'parquet-mr', 'phoenix', 'plc4x', 'pulsar',
+                'qpid-jms', 'ranger', 'reef', 'roller', 'samza', 'santuario-java', 'servicecomb-java-chassis', 'shiro',
+                'storm', 'struts', 'syncope', 'systemml', 'tajo', 'tapestry-5', 'tez', 'tika', 'tinkerpop', 'tomcat',
+                'tomee', 'uima-ruta', 'wicket', 'xmlgraphics-fop', 'zeppelin']
+
+
+class Help:
+    dataset = "Evaluated Dataset: smells | metrics | smells+metrics"
+    classifier = "Choose One or More Classifiers: Random Forest => rf | Support Vector Machine => svc | Multilayer " \
+                 "Perceptron => nmp | Decision Tree => dt | Naive Bayes => nb "
+    approach = "Choose One or More Approaches: Standard => std | Train Set Normalization => train | Test Set " \
+               "Normalization => test | KNN => knn | Best of Breed => best "
+    processes = "Choose Number of Processes: 1 .. *"
+    projects = "Choose One or More Projects in --list. If All Projects => all]}"
+    list = "Returns a list with the projects"
+    nocache = "Deactivates the use of a cache for model retrieving"
+
+
+@click.command()
+@click.option('--dataset', '-d', default="smells", help=Help.dataset)
+@click.option('--classifier', '-c', multiple=True, default=["rf", "svc", "mp", "dt", "nb"], help=Help.classifier)
+@click.option('--approach', '-a', multiple=True, default=["std", "train", "test", "knn", "best"], help=Help.approach)
+@click.option('--project', '-p', multiple=True, default=['all'], help=Help.projects)
+@click.option('--list', '-l', is_flag=True, help=Help.list)
+@click.option('--nocache', is_flag=True, help=Help.nocache)
+def main(dataset, classifier, approach, target, list, nocache):
+    if list:
+        print(Projects.projects)
+        return
+    configurator = Configurator(dataset, approach, classifier, target, nocache)
+    configs = Configuration(configurator)
+    for config in configs:
+        config["logger"] = Logger(dataset, config["target_project"].name)()
+        try:
+            CrossProjectModel(**config)()
+        except Exception as e:
+            tb = e.__traceback__
+            Discord()(f"Fail. Dataset {dataset}. Project {config['target_project'].name}."f"Exception {print_tb(tb)}")
+
+
 if __name__ == '__main__':
-    # configurations = list(
-    #     chain(Configuration(DatasetConfiguration.Smells), Configuration(DatasetConfiguration.Metrics)))
-    configurations = list(Configuration(DatasetConfiguration.Metrics))
-    with Pool(processes=99) as pool:
-        pool.map(run_store, configurations)
-    # list(map(run_store, configurations))
+    main()
