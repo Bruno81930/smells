@@ -13,3 +13,4 @@ colored
 alive-progress
 click
 libtmux
+sklearn-extensions

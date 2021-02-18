@@ -8,7 +8,7 @@ from csv import DictReader
 from datetime import datetime
 from enum import Enum, auto
 from functools import partial, lru_cache, reduce
-from itertools import product
+from itertools import product, chain, tee
 from multiprocessing import set_start_method, Pool, get_context
 
 from pathlib import Path
@@ -33,6 +33,7 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
+from sklearn_extensions.extreme_learning_machines import RBFRandomLayer, GenELMClassifier
 from toolz import apply
 
 
@@ -110,8 +111,14 @@ class Project:
         x = list(map(lambda _: list(_.values()),
                      map(lambda _: _['features'],
                          filter(lambda _: _['version'] in versions, self.data))))
-        return np.array([[v == "True" for v in sub] for sub in x], dtype=int) if self.bool_features else np.array(x,
-                                                                                                                  dtype=float)
+        try:
+            return np.array([[v == "True" for v in sub] for sub in x], dtype=int) if self.bool_features else np.array(x,
+                                                                                                                      dtype=float)
+        except:
+            x = np.array(x)
+            x = np.where(x == "True", 1, x)
+            x = np.where(x == "False", 0, x)
+            return x.astype(float)
 
     def _get_y(self, versions):
         """ Accessing the data from the project and extract the bugged information."""
@@ -492,6 +499,11 @@ class Normalization(CrossProjectApproach, ABC):
     S. Watanabe, H. Kaiya, and K. Kaijiri, ‘Adapting a fault prediction model to allow inter language reuse’,
     in Proceedings of the 4th international workshop on Predictor models in software engineering  -
     PROMISE ’08, Leipzig, Germany, 2008, p. 19, doi: 10.1145/1370788.1370794.
+
+    A. E. C. Cruz and K. Ochimizu, ‘Towards logistic regression models for predicting fault-prone code across
+     software projects’, in 2009 3rd International Symposium on Empirical Software Engineering and Measurement,
+     Lake Buena Vista, FL, USA, Oct. 2009, pp. 460–463, doi: 10.1109/ESEM.2009.5316002.
+
     """
 
     def __init__(self, encoding=True):
@@ -679,7 +691,7 @@ class KNN(CrossProjectApproach):
 
             return np.array(self._selected_X), np.array(self._selected_y)
 
-        @lru_cache(maxsize=None)
+        @lru_cache
         def _calculate_distance(self, A, B):
             return self.distance(np.frombuffer(A, dtype=int), np.frombuffer(B, dtype=int))
 
@@ -817,9 +829,71 @@ class ProfileDriven(CrossProjectApproach):
 
 
 class ELM(CrossProjectApproach):
+    """
+    Source
+    ===
+    Bal, P.R. and Kumar, S., 2018. Cross Project Software Defect Prediction using Extreme Learning Machine:
+    An Ensemble based Study. In ICSOFT (pp. 354-361).
+    """
+
     def __call__(self, model: 'CrossProjectModel'):
-        return [("a", "v", "g"), ("a", "g", "r")]
-        pass
+        model.logger.debug(f'ELM. {model.target_project.name.capitalize()}.')
+
+        configuration = {"hidden_layer": RBFRandomLayer(n_hidden=10 * 2, rbf_width=0.1, random_state=0)}
+        classifier = Classifier(GenELMClassifier, configuration)
+        evaluators = model.evaluators
+        target_project = model.target_project
+        train_projects = model.train_projects
+        dataset = model.dataset
+        approach = str(self.__class__.__name__)
+        model.logger.debug(f"Calculating for all training sets.")
+        scores = self.evaluate(classifier, evaluators, target_project, train_projects, dataset, all=True)
+
+        rows = list()
+        rows.append(Row(
+            target_project=model.target_project.name,
+            approach=approach,
+            train_project="all",
+            classifier=classifier.name,
+            classifier_configuration=classifier.configuration,
+            scores=scores))
+
+        model.logger.debug(f"Calculating for each training set.")
+        self.configurations = Configurations([classifier], model.evaluators, model.train_projects)
+        rows = list()
+        with alive_bar(len(self.configurations)) as bar:
+            for configuration in self.configurations:
+                train_project = configuration.train_project
+                evaluators = configuration.evaluators
+                print(train_project.name)
+                scores = self.evaluate(classifier, evaluators, target_project, [train_project], dataset)
+                row = Row(
+                    target_project=target_project.name,
+                    approach=approach,
+                    train_project=configuration.train_project.name,
+                    classifier=classifier.name,
+                    classifier_configuration=classifier.configuration,
+                    scores=scores)
+                bar()
+                rows.append(row)
+
+        return rows
+
+    def evaluate(self, classifier: Classifier, evaluators, target_project, train_projects: List[Project],
+                 dataset, all=False):
+        train_project_name = f"all_{target_project.name}" if all else train_projects[0].name
+        context = Context(dataset=dataset, train_project=train_project_name, target_project=target_project.name,
+                          approach=self.__class__.__name__)
+
+        model = Model(classifier, evaluators, context)
+        train_sets = tee((train_project.get_set(strategy="all") for train_project in train_projects), 2)
+        X_train = np.vstack([train_set[0] for train_set in train_sets[0]])
+        y_train = np.concatenate([train_set[1] for train_set in train_sets[1]])
+        X_test, y_test = target_project.get_set(strategy="all")
+        dataset = Dataset(X_train=X_train, y_train=y_train, X_test=X_test, y_test=y_test, context=context)
+
+        scores = model(dataset)
+        return scores
 
 
 class CrossProjectModel:
@@ -908,29 +982,6 @@ class Evaluators(Enum):
     @property
     def evaluator(self) -> Callable:
         return self.value[1]
-
-
-class DatasetConfiguration2(Enum):
-    Smells = auto(), "datasets.csv", [Standard(), TrainSetNormalization(), TestSetNormalization(),
-                                      KNN(distance='euclidean'), BestOfBreed()], "smells"
-    Metrics = auto(), "metrics_datasets.csv", [KNN(distance='euclidean')], "metrics"
-
-    # [Standard(), TrainSetNormalization(encoding=False),
-    #                                                TestSetNormalization(encoding=False)], "metrics"
-    # KNN(distance='euclidean'),
-    # BestOfBreed()], \
-
-    @property
-    def path(self) -> str:
-        return self.value[1]
-
-    @property
-    def approaches(self) -> List:
-        return self.value[2]
-
-    @property
-    def output(self):
-        return self.value[3]
 
 
 class Logger:
@@ -1067,12 +1118,18 @@ class Configuration:
 
 
 class Discord:
+    active = False
+
     def __init__(self):
+        if not Discord.active:
+            return
         load_dotenv()
         webhook_id = os.getenv('DISCORD_WEBHOOK')
         self.webhook = discord.Webhook.from_url(webhook_id, adapter=discord.RequestsWebhookAdapter())
 
     def __call__(self, message):
+        if not Discord.active:
+            return
         self.webhook.send(message)
 
 
@@ -1094,14 +1151,16 @@ class Configurator:
 
     @staticmethod
     def get_path(dataset):
-        _ = {"smells": "datasets.csv", "metrics": "metrics_datasets.csv"}
+        _ = {"smells": "datasets.csv", "metrics": "metrics_datasets.csv",
+             "smells_metrics": "smellsmetrics_datasets.csv"}
         assert dataset in _.keys(), ValueErrorMessage.dataset
         return _[dataset]
 
     @staticmethod
     def get_approaches(approaches):
         _ = {"std": Standard(), "train": TrainSetNormalization(encoding=False),
-             "test": TestSetNormalization(encoding=False), "knn": KNN(), "best": BestOfBreed()}
+             "test": TestSetNormalization(encoding=False), "knn": KNN(), "best": BestOfBreed(),
+             "elm": ELM()}
         assert all([approach in _.keys() for approach in approaches]), ValueErrorMessage.approach
         return [_[approach] for approach in approaches]
 
@@ -1163,11 +1222,11 @@ class Projects:
 
 
 class Help:
-    dataset = "Evaluated Dataset: smells | metrics | smells+metrics"
+    dataset = "Evaluated Dataset: smells | metrics | smells_metrics"
     classifier = "Choose One or More Classifiers: Random Forest => rf | Support Vector Machine => svc | Multilayer " \
-                 "Perceptron => nmp | Decision Tree => dt | Naive Bayes => nb "
+                 "Perceptron => mp | Decision Tree => dt | Naive Bayes => nb "
     approach = "Choose One or More Approaches: Standard => std | Train Set Normalization => train | Test Set " \
-               "Normalization => test | KNN => knn | Best of Breed => best "
+               "Normalization => test | KNN => knn | Best of Breed => best | ELM => elm "
     processes = "Choose Number of Processes: 1 .. *"
     projects = "Choose One or More Projects in --list. If All Projects => all]}"
     list = "Returns a list with the projects"
@@ -1177,15 +1236,30 @@ class Help:
 @click.command()
 @click.option('--dataset', '-d', default="smells", help=Help.dataset)
 @click.option('--classifier', '-c', multiple=True, default=["rf", "svc", "mp", "dt", "nb"], help=Help.classifier)
-@click.option('--approach', '-a', multiple=True, default=["std", "train", "test", "knn", "best"], help=Help.approach)
+@click.option('--approach', '-a', multiple=True, default=["std", "train", "test", "knn", "best", "elm"], help=Help.approach)
 @click.option('--project', '-p', multiple=True, default=['all'], help=Help.projects)
 @click.option('--list', '-l', is_flag=True, help=Help.list)
 @click.option('--nocache', is_flag=True, help=Help.nocache)
-def main(dataset, classifier, approach, target, list, nocache):
+def main(dataset, classifier, approach, project, list, nocache):
     if list:
         print(Projects.projects)
         return
-    configurator = Configurator(dataset, approach, classifier, target, nocache)
+    configurator = Configurator(dataset, approach, classifier, project, nocache)
+    configs = Configuration(configurator)
+    for config in configs:
+        config["logger"] = Logger(dataset, config["target_project"].name)()
+        try:
+            CrossProjectModel(**config)()
+        except Exception as e:
+            tb = e.__traceback__
+            Discord()(f"Fail. Dataset {dataset}. Project {config['target_project'].name}."f"Exception {print_tb(tb)}")
+
+
+def test(dataset, classifier, approach, project, list, nocache):
+    if list:
+        print(Projects.projects)
+        return
+    configurator = Configurator(dataset, approach, classifier, project, nocache)
     configs = Configuration(configurator)
     for config in configs:
         config["logger"] = Logger(dataset, config["target_project"].name)()
@@ -1198,3 +1272,5 @@ def main(dataset, classifier, approach, target, list, nocache):
 
 if __name__ == '__main__':
     main()
+    # test("metrics", ["rf"], ["elm"], ["shiro"], False, False)
+
