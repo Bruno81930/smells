@@ -98,55 +98,207 @@ class KNN(Approach):
     def __call__(self, server):
         self.server = server
         for name, projects in zip(self.session_names, self.subprojects):
-            self.session_name = f"new_{name}"
+            self.session_name = f"tmp_{name}"
             self.projects = projects
             super().__call__(server)
 
 
-metrics_knn = KNN("metrics", ignore=['commons-cli', 'commons-codec', 'commons-collections', 'commons-compress', 'commons-csv', 'commons-dbcp', 'commons-email', 'commons-io', 'commons-jexl', 'commons-lang', 'commons-net', 'crunch', 'myfaces', 'myfaces-tobago', 'parquet-mr', 'samza', 'santuario-java', 'servicecomb-java-chassis', 'shiro'])
-smells_knn = KNN("smells", n_processes=4, ignore=['accumulo', 'activemq', 'activemq-artemis', 'airavata', 'archiva', 'asterixdb', 'atlas', 'avro', 'beam', 'bookkeeper', 'calcite', 'camel', 'carbondata', 'cassandra', 'cayenne', 'clerezza', 'cocoon', 'commons-beanutils', 'commons-cli', 'commons-codec', 'commons-collections', 'commons-compress', 'commons-csv', 'commons-dbcp', 'commons-email', 'commons-io', 'commons-jexl', 'commons-lang', 'commons-math', 'commons-net', 'commons-validator', 'commons-vfs', 'continuum', 'crunch', 'curator', 'cxf', 'deltaspike', 'directory-kerby', 'directory-server', 'directory-studio', 'drill', 'flink', 'giraph', 'hadoop', 'hbase', 'helix', 'hive', 'isis', 'jackrabbit', 'jackrabbit-oak', 'jclouds', 'jena', 'johnzon', 'juneau', 'kafka', 'karaf', 'knox', 'kylin', 'lucene-solr', 'manifoldcf', 'maven', 'maven-surefire', 'metron', 'myfaces', 'myfaces-tobago', 'nifi', 'nutch', 'ofbiz', 'olingo-odata4', 'openjpa', 'openmeetings', 'opennlp', 'openwebbeans', 'parquet-mr', 'phoenix', 'plc4x', 'pulsar', 'qpid-jms', 'ranger', 'reef', 'roller', 'samza', 'santuario-java', 'servicecomb-java-chassis', 'shiro', 'storm', 'struts', 'syncope', 'systemml', 'tajo', 'tapestry-5', 'tez', 'tika', 'tinkerpop', 'tomcat', 'zeppelin'])
-metrics_train = Approach("metrics",
-                         "train",
-                         ['accumulo', 'activemq', 'activemq-artemis', 'airavata', 'archiva', 'asterixdb', 'atlas',
-                          'avro', 'beam', 'bookkeeper', 'calcite', 'camel', 'carbondata', 'cassandra', 'cayenne',
-                          'clerezza',
-                          'cocoon', 'commons-beanutils', 'commons-cli', 'commons-codec', 'commons-collections',
-                          'commons-compress', 'commons-csv', 'commons-dbcp', 'commons-email', 'commons-io',
-                          'commons-jexl', 'commons-lang', 'commons-math', 'commons-validator',
-                          'commons-vfs', 'continuum', 'crunch', 'curator', 'cxf', 'deltaspike', 'directory-kerby',
-                          'directory-server', 'directory-studio', 'drill', 'flink', 'giraph', 'hadoop', 'hbase',
-                          'helix', 'hive', 'isis', 'jackrabbit', 'jackrabbit-oak', 'jclouds', 'jena', 'johnzon',
-                          'juneau', 'kafka', 'karaf', 'knox', 'kylin', 'lucene-solr', 'manifoldcf', 'maven',
-                          'maven-surefire', 'metron', 'myfaces', 'myfaces-tobago', 'nifi', 'nutch', 'ofbiz',
-                          'olingo-odata4', 'openjpa', 'openmeetings', 'opennlp', 'openwebbeans', 'parquet-mr',
-                          'phoenix', 'plc4x', 'pulsar', 'qpid-jms', 'ranger', 'reef', 'roller', 'samza',
-                          'santuario-java', 'servicecomb-java-chassis', 'shiro', 'storm', 'struts', 'syncope',
-                          'systemml', 'tajo', 'tapestry-5', 'tez', 'tika', 'tinkerpop', 'tomcat', 'tomee', 'uima-ruta',
-                          'wicket', 'xmlgraphics-fop', 'zeppelin'],
-                         ["rf", "svc", "dt", "nb"]
-                         )
-smells_metrics_std = Approach("smells_metrics", "std")
-smells_metrics_train = Approach("smells_metrics", "train")
-smells_metrics_test = Approach("smells_metrics", "test")
-smells_metrics_knn = KNN("smells_metrics", ignore=['accumulo', 'activemq', 'activemq-artemis', 'airavata', 'archiva', 'asterixdb', 'atlas', 'avro', 'beam', 'bookkeeper', 'calcite', 'camel', 'carbondata', 'cassandra', 'cayenne', 'clerezza', 'cocoon', 'commons-beanutils', 'commons-cli', 'commons-codec', 'commons-collections', 'commons-compress', 'commons-csv', 'commons-dbcp', 'commons-email', 'commons-io', 'commons-jexl', 'commons-lang', 'commons-math', 'commons-net', 'commons-validator', 'commons-vfs', 'curator', 'cxf', 'deltaspike', 'directory-kerby', 'directory-server', 'johnzon', 'maven', 'maven-surefire', 'metron', 'myfaces', 'myfaces-tobago', 'olingo-odata4', 'shiro', 'storm', 'struts', 'syncope', 'tika'])
-smells_metrics_best = Approach("smells_metrics", "best")
-smells_elm = Approach("smells", "elm", ignore_clfs=["svc", "mp", "dt", "nb"])
-metrics_elm = Approach("metrics", "elm", ignore=['accumulo', 'activemq', 'activemq-artemis', 'airavata', 'archiva', 'asterixdb', 'atlas', 'avro', 'beam', 'bookkeeper', 'calcite', 'camel', 'carbondata', 'cassandra', 'cayenne', 'clerezza', 'cocoon', 'commons-beanutils', 'commons-cli', 'commons-codec', 'commons-collections', 'commons-compress', 'commons-csv', 'commons-dbcp', 'commons-email', 'commons-io', 'commons-jexl', 'commons-lang', 'commons-math', 'commons-net', 'commons-validator', 'commons-vfs', 'continuum', 'crunch', 'curator', 'cxf', 'deltaspike', 'directory-kerby', 'directory-server', 'directory-studio', 'drill', 'flink', 'giraph', 'hadoop', 'hbase', 'helix', 'hive', 'isis', 'jackrabbit', 'jackrabbit-oak', 'jclouds', 'jena', 'johnzon', 'juneau', 'kafka', 'karaf', 'knox', 'kylin', 'lucene-solr', 'manifoldcf', 'maven', 'maven-surefire', 'metron', 'myfaces', 'myfaces-tobago', 'nifi', 'nutch', 'ofbiz', 'olingo-odata4', 'openjpa', 'openmeetings', 'opennlp', 'openwebbeans', 'parquet-mr', 'phoenix', 'plc4x', 'pulsar', 'qpid-jms', 'ranger', 'reef', 'roller', 'samza', 'santuario-java', 'servicecomb-java-chassis', 'storm', 'struts', 'syncope', 'systemml', 'tajo', 'tapestry-5', 'tez', 'tika', 'tomcat', 'tomee', 'uima-ruta', 'wicket', 'xmlgraphics-fop', 'zeppelin'], ignore_clfs=["svc", "mp", "dt", "nb"], enabled=True)
-smells_metrics_elm = Approach("smells_metrics", "elm", ignore_clfs=["svc", "mp", "dt", "nb"])
-special_knn = KNN("metrics", n_processes=20, ignore=['accumulo', 'bookkeeper', 'commons-beanutils', 'commons-cli', 'commons-codec', 'commons-collections', 'commons-compress', 'commons-csv', 'commons-dbcp', 'commons-email', 'commons-io', 'commons-jexl', 'commons-lang', 'commons-math', 'commons-net', 'commons-validator', 'commons-vfs', 'continuum', 'crunch', 'curator', 'directory-kerby', 'directory-server', 'helix', 'maven-surefire', 'metron', 'myfaces', 'myfaces-tobago', 'opennlp', 'openwebbeans', 'parquet-mr', 'phoenix', 'plc4x', 'roller', 'samza', 'santuario-java', 'servicecomb-java-chassis', 'shiro', 'storm', 'tika', 'tinkerpop', 'activemq', 'calcite', 'directory-studio', 'hive', 'kafka', 'nifi', 'pulsar', 'struts', 'tomcat'])
+class BestOfBreed(Approach):
+    def __init__(self, dataset, n_processes=20, ignore=None, enabled=True):
+        super().__init__(dataset, "best", ignore=ignore, enabled=enabled)
+        self.dataset = dataset
+        self.subprojects = np.array_split(self.projects, n_processes)
+        self.session_names = [f"{dataset}_best_breed_{process}" for process in range(n_processes)]
+
+    def __call__(self, server):
+        self.server = server
+        for name, projects in zip(self.session_names, self.subprojects):
+            self.session_name = f"tmp_{name}"
+            self.projects = projects
+            super().__call__(server)
+
+
+metrics_smells = BestOfBreed("smells_metrics", n_processes=10,
+                             ignore=['accumulo', 'activemq', 'activemq-artemis', 'airavata', 'archiva', 'asterixdb',
+                                     'atlas', 'avro', 'beam', 'bookkeeper', 'calcite', 'camel', 'carbondata',
+                                     'cassandra', 'cayenne', 'clerezza', 'cocoon', 'commons-beanutils', 'commons-cli',
+                                     'commons-codec', 'commons-collections', 'commons-compress', 'commons-csv',
+                                     'commons-dbcp', 'commons-email', 'commons-io', 'commons-jexl', 'commons-lang',
+                                     'commons-math', 'commons-net', 'commons-validator', 'commons-vfs', 'continuum',
+                                     'crunch', 'curator', 'cxf', 'deltaspike', 'directory-kerby', 'directory-server',
+                                     'directory-studio', 'drill', 'flink', 'giraph', 'hadoop', 'hbase', 'jclouds',
+                                     'jena', 'johnzon', 'juneau', 'kafka', 'karaf', 'knox', 'kylin', 'lucene-solr',
+                                     'manifoldcf', 'maven', 'maven-surefire', 'metron', 'myfaces', 'myfaces-tobago',
+                                     'openmeetings', 'opennlp', 'openwebbeans', 'parquet-mr', 'phoenix', 'plc4x',
+                                     'pulsar', 'qpid-jms', 'ranger', 'reef', 'roller', 'samza', 'santuario-java',
+                                     'servicecomb-java-chassis', 'shiro', 'storm', 'struts', 'syncope', 'systemml',
+                                     'tajo', 'tapestry-5', 'tez', 'tika', 'tinkerpop', 'tomcat', 'tomee', 'uima-ruta',
+                                     'wicket', 'xmlgraphics-fop', 'zeppelin'])
+metrics_1 = BestOfBreed("metrics", n_processes=15,
+                        ignore=['accumulo', 'activemq', 'activemq-artemis', 'airavata', 'archiva', 'calcite', 'camel',
+                                'carbondata', 'cassandra', 'cayenne', 'commons-collections', 'commons-compress',
+                                'commons-csv', 'commons-dbcp', 'commons-email', 'commons-validator', 'commons-vfs',
+                                'continuum', 'crunch', 'curator', 'drill', 'flink', 'giraph', 'hadoop', 'hbase',
+                                'jclouds', 'jena', 'johnzon', 'juneau', 'kafka', 'maven', 'maven-surefire', 'metron',
+                                'myfaces', 'myfaces-tobago', 'nifi', 'nutch', 'ofbiz', 'olingo-odata4', 'openjpa',
+                                'openmeetings', 'opennlp', 'openwebbeans', 'parquet-mr', 'phoenix', 'plc4x', 'pulsar',
+                                'qpid-jms', 'ranger', 'reef', 'roller', 'samza', 'santuario-java',
+                                'servicecomb-java-chassis', 'shiro', 'storm', 'struts', 'syncope', 'systemml', 'tajo',
+                                'tapestry-5', 'tez', 'tika', 'tinkerpop', 'tomcat', 'tomee', 'uima-ruta', 'wicket',
+                                'xmlgraphics-fop', 'zeppelin']
+                        )
+metrics_2 = BestOfBreed("metrics", n_processes=2,
+                        ignore=['uima-ruta', 'xmlgraphics-fop', 'accumulo', 'activemq', 'activemq-artemis', 'airavata',
+                                'archiva', 'asterixdb', 'atlas', 'avro', 'beam', 'bookkeeper', 'calcite', 'camel',
+                                'carbondata', 'cassandra', 'cayenne', 'clerezza', 'commons-cli', 'commons-codec',
+                                'commons-collections', 'commons-compress', 'commons-csv', 'commons-dbcp',
+                                'commons-email',
+                                'commons-io', 'commons-jexl', 'commons-lang', 'commons-math', 'commons-net',
+                                'commons-validator', 'commons-vfs', 'continuum', 'crunch', 'curator', 'cxf',
+                                'deltaspike', 'directory-kerby', 'directory-server', 'directory-studio', 'drill',
+                                'flink', 'giraph', 'hadoop', 'hbase', 'helix', 'hive', 'isis', 'jackrabbit',
+                                'jackrabbit-oak', 'jclouds', 'jena', 'johnzon', 'juneau', 'kafka', 'karaf', 'knox',
+                                'kylin', 'lucene-solr', 'manifoldcf', 'maven', 'maven-surefire', 'metron', 'myfaces',
+                                'myfaces-tobago', 'nifi', 'nutch', 'ofbiz', 'olingo-odata4', 'openjpa', 'openmeetings',
+                                'opennlp', 'openwebbeans', 'parquet-mr', 'phoenix', 'plc4x', 'pulsar', 'qpid-jms',
+                                'ranger', 'reef', 'roller', 'samza', 'santuario-java', 'servicecomb-java-chassis',
+                                'shiro', 'storm', 'struts', 'syncope', 'systemml', 'tajo', 'tapestry-5', 'tez', 'tika',
+                                'tinkerpop', 'tomcat', 'tomee', 'wicket', 'zeppelin'])
+smells = BestOfBreed("smells", n_processes=15,
+                     ignore=['accumulo', 'activemq', 'activemq-artemis', 'airavata', 'archiva', 'asterixdb', 'atlas',
+                             'avro', 'beam', 'bookkeeper', 'calcite', 'camel', 'carbondata', 'cassandra', 'cayenne',
+                             'clerezza', 'cocoon', 'commons-beanutils', 'commons-cli', 'commons-codec',
+                             'commons-collections', 'commons-compress', 'commons-csv', 'commons-dbcp', 'commons-email',
+                             'commons-io', 'commons-jexl', 'commons-lang', 'commons-math', 'commons-net',
+                             'commons-validator', 'commons-vfs', 'continuum', 'crunch', 'curator', 'cxf', 'deltaspike',
+                             'directory-kerby', 'directory-server', 'directory-studio', 'helix', 'hive', 'isis',
+                             'jackrabbit', 'jackrabbit-oak', 'jclouds', 'jena', 'johnzon', 'juneau', 'kafka', 'karaf',
+                             'knox', 'kylin', 'lucene-solr', 'manifoldcf', 'maven', 'maven-surefire', 'metron',
+                             'myfaces', 'myfaces-tobago', 'nifi', 'nutch', 'ofbiz', 'olingo-odata4', 'openjpa', 'plc4x',
+                             'pulsar', 'qpid-jms', 'ranger', 'reef', 'roller', 'samza', 'santuario-java',
+                             'servicecomb-java-chassis', 'shiro', 'storm', 'struts', 'syncope', 'systemml', 'tajo',
+                             'tomee', 'uima-ruta', 'wicket', 'xmlgraphics-fop', 'zeppelin'])
+
+# metrics_knn = KNN("metrics", ignore=['commons-cli', 'commons-codec', 'commons-collections', 'commons-compress', 'commons-csv', 'commons-dbcp', 'commons-email', 'commons-io', 'commons-jexl', 'commons-lang', 'commons-net', 'crunch', 'myfaces', 'myfaces-tobago', 'parquet-mr', 'samza', 'santuario-java', 'servicecomb-java-chassis', 'shiro'])
+# smells_knn = KNN("smells", n_processes=4, ignore=['accumulo', 'activemq', 'activemq-artemis', 'airavata', 'archiva', 'asterixdb', 'atlas', 'avro', 'beam', 'bookkeeper', 'calcite', 'camel', 'carbondata', 'cassandra', 'cayenne', 'clerezza', 'cocoon', 'commons-beanutils', 'commons-cli', 'commons-codec', 'commons-collections', 'commons-compress', 'commons-csv', 'commons-dbcp', 'commons-email', 'commons-io', 'commons-jexl', 'commons-lang', 'commons-math', 'commons-net', 'commons-validator', 'commons-vfs', 'continuum', 'crunch', 'curator', 'cxf', 'deltaspike', 'directory-kerby', 'directory-server', 'directory-studio', 'drill', 'flink', 'giraph', 'hadoop', 'hbase', 'helix', 'hive', 'isis', 'jackrabbit', 'jackrabbit-oak', 'jclouds', 'jena', 'johnzon', 'juneau', 'kafka', 'karaf', 'knox', 'kylin', 'lucene-solr', 'manifoldcf', 'maven', 'maven-surefire', 'metron', 'myfaces', 'myfaces-tobago', 'nifi', 'nutch', 'ofbiz', 'olingo-odata4', 'openjpa', 'openmeetings', 'opennlp', 'openwebbeans', 'parquet-mr', 'phoenix', 'plc4x', 'pulsar', 'qpid-jms', 'ranger', 'reef', 'roller', 'samza', 'santuario-java', 'servicecomb-java-chassis', 'shiro', 'storm', 'struts', 'syncope', 'systemml', 'tajo', 'tapestry-5', 'tez', 'tika', 'tinkerpop', 'tomcat', 'zeppelin'])
+# metrics_train = Approach("metrics",
+#                          "train",
+#                          ['accumulo', 'activemq', 'activemq-artemis', 'airavata', 'archiva', 'asterixdb', 'atlas',
+#                           'avro', 'beam', 'bookkeeper', 'calcite', 'camel', 'carbondata', 'cassandra', 'cayenne',
+#                           'clerezza',
+#                           'cocoon', 'commons-beanutils', 'commons-cli', 'commons-codec', 'commons-collections',
+#                           'commons-compress', 'commons-csv', 'commons-dbcp', 'commons-email', 'commons-io',
+#                           'commons-jexl', 'commons-lang', 'commons-math', 'commons-validator',
+#                           'commons-vfs', 'continuum', 'crunch', 'curator', 'cxf', 'deltaspike', 'directory-kerby',
+#                           'directory-server', 'directory-studio', 'drill', 'flink', 'giraph', 'hadoop', 'hbase',
+#                           'helix', 'hive', 'isis', 'jackrabbit', 'jackrabbit-oak', 'jclouds', 'jena', 'johnzon',
+#                           'juneau', 'kafka', 'karaf', 'knox', 'kylin', 'lucene-solr', 'manifoldcf', 'maven',
+#                           'maven-surefire', 'metron', 'myfaces', 'myfaces-tobago', 'nifi', 'nutch', 'ofbiz',
+#                           'olingo-odata4', 'openjpa', 'openmeetings', 'opennlp', 'openwebbeans', 'parquet-mr',
+#                           'phoenix', 'plc4x', 'pulsar', 'qpid-jms', 'ranger', 'reef', 'roller', 'samza',
+#                           'santuario-java', 'servicecomb-java-chassis', 'shiro', 'storm', 'struts', 'syncope',
+#                           'systemml', 'tajo', 'tapestry-5', 'tez', 'tika', 'tinkerpop', 'tomcat', 'tomee', 'uima-ruta',
+#                           'wicket', 'xmlgraphics-fop', 'zeppelin'],
+#                          ["rf", "svc", "dt", "nb"]
+#                          )
+# smells_metrics_std = Approach("smells_metrics", "std")
+# smells_metrics_train = Approach("smells_metrics", "train")
+# smells_metrics_test = Approach("smells_metrics", "test")
+# smells_metrics_knn = KNN("smells_metrics", ignore=['accumulo', 'activemq', 'activemq-artemis', 'airavata', 'archiva', 'asterixdb', 'atlas', 'avro', 'beam', 'bookkeeper', 'calcite', 'camel', 'carbondata', 'cassandra', 'cayenne', 'clerezza', 'cocoon', 'commons-beanutils', 'commons-cli', 'commons-codec', 'commons-collections', 'commons-compress', 'commons-csv', 'commons-dbcp', 'commons-email', 'commons-io', 'commons-jexl', 'commons-lang', 'commons-math', 'commons-net', 'commons-validator', 'commons-vfs', 'curator', 'cxf', 'deltaspike', 'directory-kerby', 'directory-server', 'johnzon', 'maven', 'maven-surefire', 'metron', 'myfaces', 'myfaces-tobago', 'olingo-odata4', 'shiro', 'storm', 'struts', 'syncope', 'tika'])
+# smells_metrics_best = Approach("smells_metrics", "best")
+# smells_elm = Approach("smells", "elm", ignore_clfs=["svc", "mp", "dt", "nb"])
+# metrics_elm = Approach("metrics", "elm", ignore=['accumulo', 'activemq', 'activemq-artemis', 'airavata', 'archiva', 'asterixdb', 'atlas', 'avro', 'beam', 'bookkeeper', 'calcite', 'camel', 'carbondata', 'cassandra', 'cayenne', 'clerezza', 'cocoon', 'commons-beanutils', 'commons-cli', 'commons-codec', 'commons-collections', 'commons-compress', 'commons-csv', 'commons-dbcp', 'commons-email', 'commons-io', 'commons-jexl', 'commons-lang', 'commons-math', 'commons-net', 'commons-validator', 'commons-vfs', 'continuum', 'crunch', 'curator', 'cxf', 'deltaspike', 'directory-kerby', 'directory-server', 'directory-studio', 'drill', 'flink', 'giraph', 'hadoop', 'hbase', 'helix', 'hive', 'isis', 'jackrabbit', 'jackrabbit-oak', 'jclouds', 'jena', 'johnzon', 'juneau', 'kafka', 'karaf', 'knox', 'kylin', 'lucene-solr', 'manifoldcf', 'maven', 'maven-surefire', 'metron', 'myfaces', 'myfaces-tobago', 'nifi', 'nutch', 'ofbiz', 'olingo-odata4', 'openjpa', 'openmeetings', 'opennlp', 'openwebbeans', 'parquet-mr', 'phoenix', 'plc4x', 'pulsar', 'qpid-jms', 'ranger', 'reef', 'roller', 'samza', 'santuario-java', 'servicecomb-java-chassis', 'storm', 'struts', 'syncope', 'systemml', 'tajo', 'tapestry-5', 'tez', 'tika', 'tomcat', 'tomee', 'uima-ruta', 'wicket', 'xmlgraphics-fop', 'zeppelin'], ignore_clfs=["svc", "mp", "dt", "nb"], enabled=True)
+# smells_metrics_elm = Approach("smells_metrics", "elm", ignore_clfs=["svc", "mp", "dt", "nb"])
+# special_knn = KNN("metrics", n_processes=20, ignore=['accumulo', 'bookkeeper', 'commons-beanutils', 'commons-cli', 'commons-codec', 'commons-collections', 'commons-compress', 'commons-csv', 'commons-dbcp', 'commons-email', 'commons-io', 'commons-jexl', 'commons-lang', 'commons-math', 'commons-net', 'commons-validator', 'commons-vfs', 'continuum', 'crunch', 'curator', 'directory-kerby', 'directory-server', 'helix', 'maven-surefire', 'metron', 'myfaces', 'myfaces-tobago', 'opennlp', 'openwebbeans', 'parquet-mr', 'phoenix', 'plc4x', 'roller', 'samza', 'santuario-java', 'servicecomb-java-chassis', 'shiro', 'storm', 'tika', 'tinkerpop', 'activemq', 'calcite', 'directory-studio', 'hive', 'kafka', 'nifi', 'pulsar', 'struts', 'tomcat'])
+
+# smells_std = Approach("smells", "std")
+# smells_train = Approach("smells", "train")
+# smells_test = Approach("smells", "test")
+# smells_best = Approach("smells", "best")
+# smells_knn = KNN("smells", n_processes=20)
+# smells_elm = Approach("smells", "elm", ignore_clfs=["svc", "mp", "dt", "nb"])
+#
+# metrics_std = Approach("metrics", "std")
+# metrics_train = Approach("metrics", "train")
+# metrics_test = Approach("metrics", "test")
+# metrics_best = Approach("metrics", "best")
+# # metrics_knn = KNN("metrics")
+# metrics_elm = Approach("metrics", "elm", ignore_clfs=["svc", "mp", "dt", "nb"])
+#
+# smells_metrics_std = Approach("smells_metrics", "std")
+# smells_metrics_train = Approach("smells_metrics", "train")
+# smells_metrics_test = Approach("smells_metrics", "test")
+# smells_metrics_knn = KNN("smells_metrics", n_processes=20)
+# smells_metrics_best = Approach("smells_metrics", "best")
+# smells_metrics_elm = Approach("smells_metrics", "elm", ignore_clfs=["svc", "mp", "dt", "nb"])
+#
+# broke_knn = KNN("metrics", n_processes=3,
+#                 ignore=['accumulo', 'activemq', 'activemq-artemis', 'airavata', 'archiva', 'asterixdb', 'atlas',
+#                         'avro', 'beam', 'bookkeeper', 'calcite', 'camel', 'carbondata', 'cassandra', 'cayenne',
+#                         'clerezza', 'cocoon', 'commons-beanutils', 'commons-cli', 'commons-codec',
+#                         'commons-collections', 'commons-compress', 'commons-csv', 'commons-dbcp', 'commons-email',
+#                         'commons-io', 'commons-jexl', 'commons-lang', 'commons-math', 'commons-net',
+#                         'commons-validator', 'commons-vfs', 'continuum', 'crunch', 'curator', 'cxf', 'deltaspike',
+#                         'directory-kerby', 'directory-server', 'directory-studio', 'drill', 'flink', 'giraph',
+#                         'helix', 'hive', 'jackrabbit', 'jackrabbit-oak', 'jclouds',
+#                         'jena',
+#                         'johnzon', 'juneau', 'kafka', 'karaf', 'knox', 'kylin', 'lucene-solr', 'manifoldcf',
+#                         'maven',
+#                         'maven-surefire', 'metron', 'myfaces', 'myfaces-tobago', 'nifi', 'nutch', 'ofbiz',
+#                         'olingo-odata4', 'openjpa', 'openmeetings', 'opennlp', 'openwebbeans', 'parquet-mr',
+#                         'phoenix',
+#                         'plc4x', 'pulsar', 'qpid-jms', 'ranger', 'reef', 'roller', 'samza', 'santuario-java',
+#                         'servicecomb-java-chassis', 'shiro', 'storm', 'struts', 'syncope', 'systemml', 'tajo',
+#                         'tapestry-5', 'tez', 'tika', 'tinkerpop', 'tomcat', 'tomee', 'uima-ruta', 'wicket',
+#                         'xmlgraphics-fop', 'zeppelin'])
+#
+# metrics_20_ignore = ['jclouds', 'jena', 'johnzon', 'juneau', 'kafka', 'karaf', 'knox', 'kylin', 'lucene-solr',
+#                      'manifoldcf', 'maven', 'maven-surefire', 'metron', 'myfaces', 'myfaces-tobago', 'nifi', 'nutch',
+#                      'ofbiz', 'olingo-odata4', 'openjpa', 'openmeetings', 'opennlp', 'openwebbeans', 'parquet-mr',
+#                      'phoenix', 'plc4x', 'pulsar', 'qpid-jms', 'ranger', 'reef', 'roller', 'samza', 'santuario-java',
+#                      'servicecomb-java-chassis', 'shiro', 'storm', 'struts', 'syncope', 'systemml', 'tajo',
+#                      'tapestry-5', 'tez', 'tika', 'tinkerpop', 'tomcat', 'tomee', 'uima-ruta', 'wicket',
+#                      'xmlgraphics-fop', 'zeppelin']
+#
+# metrics_21_ignore = ['accumulo', 'activemq', 'activemq-artemis', 'airavata', 'archiva', 'asterixdb',
+#                      'atlas', 'avro', 'beam', 'bookkeeper', 'calcite', 'camel', 'carbondata',
+#                      'cassandra', 'cayenne', 'clerezza', 'cocoon', 'commons-beanutils',
+#                      'commons-cli', 'commons-codec', 'commons-collections', 'commons-compress',
+#                      'commons-csv', 'commons-dbcp', 'commons-email', 'commons-io', 'commons-jexl',
+#                      'commons-lang', 'commons-math', 'commons-net', 'commons-validator',
+#                      'commons-vfs', 'continuum', 'crunch', 'curator', 'cxf', 'deltaspike',
+#                      'directory-kerby', 'directory-server', 'directory-studio', 'drill', 'flink',
+#                      'giraph', 'hadoop', 'hbase', 'helix', 'hive', 'isis', 'jackrabbit',
+#                      'jackrabbit-oak']
+#
+# ise_20_metrics = KNN("metrics", n_processes=20, ignore=metrics_20_ignore)
+# ise_21_metrics = KNN("metrics", n_processes=20, ignore=metrics_21_ignore)
+#
+# standard_problem = Approach("smells", "std",
+#                             ignore=['accumulo', 'activemq', 'activemq-artemis', 'airavata', 'archiva', 'asterixdb',
+#                                     'atlas', 'avro', 'beam', 'bookkeeper', 'calcite', 'camel', 'carbondata',
+#                                     'cassandra', 'cayenne', 'clerezza', 'cocoon', 'commons-beanutils', 'commons-cli',
+#                                     'commons-codec', 'commons-collections', 'commons-compress', 'commons-csv',
+#                                     'commons-dbcp', 'commons-email', 'commons-io', 'commons-jexl', 'commons-lang',
+#                                     'commons-math', 'commons-net', 'commons-validator', 'commons-vfs', 'continuum',
+#                                     'crunch', 'curator', 'cxf', 'deltaspike', 'directory-kerby', 'directory-server',
+#                                     'directory-studio', 'drill', 'flink', 'giraph', 'hadoop', 'hbase', 'helix', 'hive',
+#                                     'isis', 'jackrabbit', 'jackrabbit-oak', 'jclouds', 'jena', 'johnzon', 'juneau',
+#                                     'kafka', 'karaf', 'knox', 'kylin', 'lucene-solr', 'manifoldcf', 'maven',
+#                                     'maven-surefire', 'metron', 'myfaces', 'myfaces-tobago', 'nifi', 'nutch', 'ofbiz',
+#                                     'olingo-odata4', 'openjpa', 'openmeetings', 'opennlp', 'openwebbeans', 'parquet-mr',
+#                                     'phoenix', 'plc4x', 'pulsar', 'qpid-jms', 'ranger', 'reef', 'roller', 'samza',
+#                                     'santuario-java',
+#                                     'servicecomb-java-chassis'],
+#                             ignore_clfs=["rf", "mp", "dt", "nb"])
+
+
+
 modules = [
-    # metrics_knn,
-    # smells_knn,
-    # smells_metrics_std,
-    # smells_metrics_train,
-    # smells_metrics_test,
-    # smells_metrics_knn,
-    # smells_metrics_best,
-    # smells_elm,
-    # metrics_elm,
-    # smells_metrics_elm
-    # metrics_train
-    special_knn
+    # metrics_smells,
+    # smells,
+    metrics_2
+    # metrics_smells
 ]
-ISE2021 = libtmux.Server()
-[module(ISE2021) for module in modules]
+ISE2020 = libtmux.Server()
+[module(ISE2020) for module in modules]

@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 import time
 from traceback import print_tb
 from abc import ABC, abstractmethod
@@ -27,7 +28,8 @@ from scipy.spatial.distance import cosine, jaccard, rogerstanimoto, euclidean
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import f1_score, roc_auc_score, precision_score, recall_score, brier_score_loss, fbeta_score
+from sklearn.metrics import f1_score, roc_auc_score, precision_score, recall_score, brier_score_loss, fbeta_score, \
+    precision_recall_curve, auc
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
@@ -162,8 +164,21 @@ class Row:
         self.train_project = train_project
         self.classifier = classifier
         self.classifier_configuration = classifier_configuration
-        self.elements = [[target_project, approach, train_project, classifier,
-                          classifier_configuration, item.evaluator, item.score] for item in scores]
+        self.precision_recall_curve = scores[0]
+        self.elements = [
+            [target_project,
+             approach,
+             train_project,
+             classifier,
+             classifier_configuration,
+             item.evaluator,
+             self.calculate(item.score) if idx == 0 else item.score] for idx, item in enumerate(scores)]
+        # classifier_configuration, item.evaluator, item.score] for item in scores]
+
+    @staticmethod
+    def calculate(score):
+        precision, recall, _ = score
+        return auc(recall, precision)
 
     # def __iter__(self):
     #     for element in self.elements:
@@ -691,7 +706,7 @@ class KNN(CrossProjectApproach):
 
             return np.array(self._selected_X), np.array(self._selected_y)
 
-        @lru_cache
+        @lru_cache(maxsize=256)
         def _calculate_distance(self, A, B):
             return self.distance(np.frombuffer(A, dtype=int), np.frombuffer(B, dtype=int))
 
@@ -772,20 +787,16 @@ class BestOfBreed(CrossProjectApproach):
         classifiers = [Classifier(*classifier) for classifier in model.classifiers]
         self.configurations = Configurations(classifiers, model.evaluators)
 
-        best_breed = self.evaluate_breed(dataset, train_projects, target_project, classifiers)
-
         rows = list()
-        with alive_bar(len(self.configurations)) as bar:
-            for configuration in self.configurations:
-                train_project = configuration.train_project
-                classifier = configuration.classifier
-                evaluators = configuration.evaluators
-                context = best_breed.context
-                scores = Model(classifier, evaluators, context)(best_breed)
+        with alive_bar(len(classifiers)) as bar:
+            for classifier in classifiers:
+                train_project = self.evaluate_breed(dataset, train_projects, classifier)
+                evaluators = model.evaluators
+                scores = self.evaluate(dataset, classifier, evaluators, train_project, target_project)
                 row = Row(
-                    target_project=target_project.name,
+                    target_project=model.target_project.name,
                     approach=approach,
-                    train_project=train_project,
+                    train_project=train_project.name,
                     classifier=classifier.name,
                     classifier_configuration=classifier.configuration,
                     scores=scores
@@ -795,21 +806,35 @@ class BestOfBreed(CrossProjectApproach):
 
         return rows
 
-    def evaluate_breed(self, dataset: str, train_projects: List[Project], target_project: Project,
-                       classifiers: List[Classifier]) -> Dataset:
-        train_sets = {train_project.name: train_project.get_set(strategy="all") for train_project in train_projects}
+    def evaluate(self, dataset, classifier, evaluators, train_project, target_project):
+        context = Context(dataset, train_project.name, target_project.name, self.__class__.__name__)
+        X_train, y_train = train_project.get_set(strategy="all")
         X_test, y_test = target_project.get_set(strategy="all")
-        datasets = [Dataset(*train_sets[train_project],
-                            X_test,
-                            y_test,
-                            Context(dataset, train_project, target_project.name, self.__class__.__name__))
-                    for train_project in train_sets.keys()]
-        models = {dataset: [Model(classifier, [self.breed_evaluator], dataset.context)
-                            for classifier in classifiers]
-                  for dataset in datasets}
+        dataset = Dataset(X_train, y_train, X_test, y_test, context)
+        model = Model(classifier, evaluators, context)
+        scores = model(dataset)
+        return scores
 
-        scores = {dataset: np.mean(list(map(lambda model: model(dataset)[0].score, models[dataset])))
-                  for dataset in models.keys()}
+    def evaluate_breed(self, dataset: str, train_projects: List[Project], classifier: Classifier):
+        def calculate(train_project):
+            nonlocal dataset
+            nonlocal classifier
+            test_projects = list(filter(lambda project: project != train_project, train_projects))
+            X_train, y_train = train_project.get_set(strategy="all")
+            test_sets = {test_project.name: test_project.get_set(strategy="all") for test_project in test_projects}
+            datasets = [Dataset(X_train,
+                                y_train,
+                                *test_sets[test_project],
+                                Context(dataset, train_project.name, test_project, self.__class__.__name__))
+                        for test_project in test_sets.keys()]
+            model = Model(classifier, [self.breed_evaluator], datasets[0].context)
+            return np.mean([model(dataset)[0].score for dataset in datasets])
+
+        scores = dict()
+        with alive_bar(len(train_projects)) as bar:
+            for project in train_projects:
+                scores[project] = calculate(project)
+                bar()
 
         return max(scores, key=scores.get)
 
@@ -973,6 +998,7 @@ class Classifiers(Enum):
 
 
 class Evaluators(Enum):
+    PRC = auto(), precision_recall_curve
     AUC = auto(), roc_auc_score
     F1_Score = auto(), f1_score
     Precision = auto(), precision_score
@@ -1035,7 +1061,9 @@ class StoreResults:
     def __init__(self, dataset, out_path=Path(Path(__file__).parent, "out")):
         self.out_path = out_path
         Path(out_path).mkdir(exist_ok=True, parents=True)
-        self.path = str(Path(out_path, f'{dataset}.csv'))
+        # self.path = str(Path(out_path, f'tmp_{dataset}.csv'))
+        # self.path = str(Path(out_path, f'{dataset}.csv'))
+        self.path = str(Path(out_path, f'best_{dataset}.csv'))
         self.column_names = ['Target Project', 'Approach', 'Train Project',
                              'Classifier', 'Classifier Configuration', 'Evaluator', 'Value']
         if not os.path.exists(self.path):
@@ -1236,7 +1264,8 @@ class Help:
 @click.command()
 @click.option('--dataset', '-d', default="smells", help=Help.dataset)
 @click.option('--classifier', '-c', multiple=True, default=["rf", "svc", "mp", "dt", "nb"], help=Help.classifier)
-@click.option('--approach', '-a', multiple=True, default=["std", "train", "test", "knn", "best", "elm"], help=Help.approach)
+@click.option('--approach', '-a', multiple=True, default=["std", "train", "test", "knn", "best", "elm"],
+              help=Help.approach)
 @click.option('--project', '-p', multiple=True, default=['all'], help=Help.projects)
 @click.option('--list', '-l', is_flag=True, help=Help.list)
 @click.option('--nocache', is_flag=True, help=Help.nocache)
@@ -1272,5 +1301,4 @@ def test(dataset, classifier, approach, project, list, nocache):
 
 if __name__ == '__main__':
     main()
-    # test("metrics", ["rf"], ["elm"], ["shiro"], False, False)
-
+    # test("smells", ["rf"], ["best"], ["shiro"], False, False)
