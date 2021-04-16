@@ -1301,4 +1301,4 @@ def test(dataset, classifier, approach, project, list, nocache):
 
 if __name__ == '__main__':
     main()
-    # test("smells", ["rf"], ["best"], ["shiro"], False, False)
+    #test("metrics", ["rf"], ["best"], ["shiro"], False, False)
